@@ -53,7 +53,7 @@ class ReportDialog(QDialog):
 
 class KoboHighlightKeeperAction(InterfaceAction):
     name = 'Kobo Highlight Keeper'
-    action_spec = ('Kobo annotations', None, 'Keep Kobo highlights in calibre and restore them', None)
+    action_spec = ('Kobo highlights', None, 'Keep Kobo highlights in calibre and restore them to the Kobo', None)
     popup_type = QToolButton.ToolButtonPopupMode.InstantPopup
     action_type = 'current'
 
@@ -63,23 +63,59 @@ class KoboHighlightKeeperAction(InterfaceAction):
         self.menu = QMenu(self.gui)
         self.qaction.setMenu(self.menu)
         m = self.menu
-        self.create_menu_action(m, 'khk-sync-all', 'Sync annotations with Kobo now',
-                                icon='sync.png', triggered=partial(self.sync, None, True))
-        self.create_menu_action(m, 'khk-sync-sel', 'Sync selected books only',
-                                triggered=self.sync_selected)
+        m.setToolTipsVisible(True)
+
+        def item(key, text, tip, triggered, icon=None):
+            ac = self.create_menu_action(m, key, text, icon=icon, description=tip, triggered=triggered)
+            ac.setToolTip(tip)
+            return ac
+
+        # with the Kobo
+        self.sync_all_action = item(
+            'khk-sync-all', 'Sync with Kobo now',
+            'Copy new and edited highlights from the Kobo into calibre, and put back any the Kobo has lost. '
+            'Runs automatically when a Kobo is connected.',
+            partial(self.sync, None, True), icon='sync.png')
+        self.sync_sel_action = item(
+            'khk-sync-sel', 'Sync selected books with Kobo',
+            'Same as Sync with Kobo now, for the books selected in the library only.',
+            self.sync_selected)
         m.addSeparator()
-        self.create_menu_action(m, 'khk-report', 'Show sync history', icon='dialog_information.png',
-                                triggered=self.show_report)
-        self.create_menu_action(m, 'khk-export', 'Export selected books’ annotations to Markdown…',
-                                icon='save.png', triggered=self.export_selected)
-        self.create_menu_action(m, 'khk-undelete', 'Restore highlights deleted on the Kobo (selected books)',
-                                triggered=self.undelete_selected)
+        # with the selected books
+        self.export_action = item(
+            'khk-export', 'Export highlights of selected books…',
+            'Save the highlights and notes of the selected books as Markdown files, one per book.',
+            self.export_selected, icon='save.png')
+        self.undelete_action = item(
+            'khk-undelete', 'Send back highlights deleted on the Kobo',
+            'Highlights you delete on the Kobo stay in calibre (struck out). '
+            'This puts them back on the Kobo for the selected books at the next sync.',
+            self.undelete_selected)
         m.addSeparator()
-        self.create_menu_action(m, 'khk-config', 'Settings…', icon='config.png',
-                                triggered=lambda: self.interface_action_base_plugin.do_user_config(self.gui))
+        item('khk-report', 'Sync history',
+             'What the recent syncs did: highlights copied, restored, repaired or removed.',
+             self.show_report, icon='dialog_information.png')
+        item('khk-config', 'Settings…', 'Automatic sync, calibre viewer, Kobo database backups.',
+             lambda: self.interface_action_base_plugin.do_user_config(self.gui), icon='config.png')
+        m.aboutToShow.connect(self._update_menu)
         self._synced_this_connection = False
         device_signals.device_connection_changed.connect(self._connection_changed)
         device_signals.device_metadata_available.connect(self._metadata_available)
+
+    def _update_menu(self):
+        """Grey out what can't run right now, and say why."""
+        connected = self.kobo() is not None
+        selected = bool(self.gui.library_view.get_selected_ids())
+        self.sync_all_action.setEnabled(connected)
+        self.sync_all_action.setText('Sync with Kobo now' if connected else 'Sync with Kobo now (connect a Kobo)')
+        self.sync_sel_action.setEnabled(connected and selected)
+        self.sync_sel_action.setText('Sync selected books with Kobo' if connected and selected else
+                                     'Sync selected books with Kobo (' +
+                                     ('connect a Kobo' if not connected else 'select books') + ')')
+        for ac, text in ((self.export_action, 'Export highlights of selected books…'),
+                         (self.undelete_action, 'Send back highlights deleted on the Kobo')):
+            ac.setEnabled(selected)
+            ac.setText(text if selected else text.rstrip('…') + ' (select books)')
 
     # --- device ---------------------------------------------------------------
     def kobo(self):
@@ -220,7 +256,9 @@ class KoboHighlightKeeperAction(InterfaceAction):
     def undelete_selected(self):
         db = self.gui.current_db.new_api
         n = sum(store.reactivate_deleted(db, i) for i in self.gui.library_view.get_selected_ids())
-        info_dialog(self.gui, 'Highlights reactivated',
-                    f'{n} highlight(s) will be restored to the Kobo on the next sync.', show=True)
+        where = 'now' if self.kobo() is not None else 'the next time the Kobo is connected'
+        info_dialog(self.gui, 'Highlights to send back',
+                    f'{n} highlight(s) deleted on the Kobo will be put back on it {where}.' if n else
+                    'None of the selected books have highlights that were deleted on the Kobo.', show=True)
         if n and self.kobo() is not None:
             self.sync(None, True)

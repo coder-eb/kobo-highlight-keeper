@@ -8,7 +8,7 @@ calibre is the main copy. The Kobo holds a working copy that can be rebuilt.
 
 ## What it does
 
-When a Kobo is connected (or when you pick **Kobo annotations → Sync now**),
+When a Kobo is connected (or when you pick **Kobo highlights → Sync with Kobo now**),
 the plugin does the following for every book on the device that's in your
 library:
 
@@ -174,10 +174,11 @@ python3 harness/run_gui.py                 # scripted run of the real calibre GU
   `metadata.db` is never opened. The sandbox calibre uses its own config,
   cache and temp dirs (`CALIBRE_*_DIRECTORY`), plus its own single-instance
   lock and GUI socket (`harness/launch_gui.py`).
-- **Normal calibre open?** `run_gui.py` refuses to start while it's running,
-  unless you pass `--alongside`. The lock and socket are isolated, but a full
-  run alongside an open calibre hasn't been verified. The non-GUI steps
-  (`setup_sandbox.py`, the tests) are safe to run any time.
+- **Running next to your normal calibre is fine.** The full GUI scenario has
+  run alongside an open calibre without affecting it.
+- **No real Kobo can be touched.** The sandbox calibre has USB/MTP device
+  detection switched off, and `run_gui.py` refuses to start while a drive
+  containing a Kobo database is mounted.
 - **Kobo.** The simulated device is a folder with a real-firmware schema
   (`harness/schema/nickel-176.sql`, DB version 176). calibre's own **Kobo
   driver** is attached to it through "connect to folder as device" (Clara
@@ -186,19 +187,31 @@ python3 harness/run_gui.py                 # scripted run of the real calibre GU
   indexes books after "eject", creates highlights, deletes them, and checks
   with its own parser that every highlight points at its text.
 
-### What the simulation can't prove
+### Checked on a real Kobo
 
-These depend on the real Kobo firmware and are marked ASSUMED in the code:
+On a Kobo Clara BW, deleting a highlighted book from the Kobo and re-sending
+it brought its highlights back. That confirms the Kobo shows highlight rows
+written while it's connected.
 
-- that the Kobo shows rows written while it was connected (same as Kobo
-  Utilities / kobo2calibre writes, but not checked here)
+Still unconfirmed on a real device (marked ASSUMED in the code):
+
 - epub `#point(...)` offsets being in UTF-8 bytes (kepub span offsets are
-  characters)
-- what the Kobo does with existing rows when an indexed file is replaced
-  (`fake_nickel.py import --wipe-on-change` simulates the harsher case)
+  characters). This only matters for books sent as plain EPUB rather than
+  KEPUB.
+- what the Kobo does with existing rows when an indexed file is replaced in
+  place, e.g. after editing a book and re-sending it without deleting it
+  first. `fake_nickel.py import --wipe-on-change` simulates the harsher case.
 
-A one-book check on the real device (with the automatic DB backup) settles
-all three.
+## Menu
+
+| Item | What it does |
+|---|---|
+| **Sync with Kobo now** | Same as the automatic sync on connect. Greyed out without a Kobo. |
+| **Sync selected books with Kobo** | The same, limited to the books selected in the library. |
+| **Export highlights of selected books…** | Markdown files, one per book, grouped by chapter. |
+| **Send back highlights deleted on the Kobo** | Highlights you deleted on the Kobo stay in calibre, struck out. This puts them back on the Kobo for the selected books. |
+| **Sync history** | What the last 30 syncs did. |
+| **Settings…** | Automatic sync, calibre viewer copies, Kobo database backups. |
 
 ## Credits / references
 

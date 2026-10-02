@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 from sandbox_env import CALIBRE_BIN, PROJECT, RUN_DIR, calibre_env
 
@@ -22,26 +23,15 @@ def run(cmd, env=None, **kw):
     return subprocess.run([str(c) for c in cmd], env=env, check=True, **kw)
 
 
-def real_calibre_running():
-    """PIDs of calibre GUIs that are not this sandbox's."""
-    out = subprocess.run(['pgrep', '-fl', 'calibre.app/Contents/MacOS/calibre'], capture_output=True, text=True)
-    return [line for line in out.stdout.splitlines()
-            if str(PROJECT) not in line and 'calibre-parallel' not in line and line.rstrip().endswith('/calibre')]
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--visible', action='store_true')
     ap.add_argument('--timeout', type=int, default=900)
-    ap.add_argument('--alongside', action='store_true',
-                    help='run even if your normal calibre is open (lock/socket are isolated, '
-                         'but a full run alongside it has not been verified)')
     args = ap.parse_args()
 
-    running = real_calibre_running()
-    if running and not args.alongside:
-        sys.exit('Your normal calibre is running; quit it first or pass --alongside:\n  '
-                 + '\n  '.join(running))
+    kobos = [str(v) for v in Path('/Volumes').glob('*') if (v / '.kobo').is_dir()]
+    if kobos:
+        sys.exit(f'A real Kobo is mounted ({", ".join(kobos)}); eject it before running the GUI scenario.')
 
     harness = PROJECT / 'harness'
     run([sys.executable, harness / 'setup_sandbox.py', '--force'])

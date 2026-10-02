@@ -29,6 +29,21 @@ from calibre.gui2 import listener  # noqa: E402  (binds gui_socket_address by na
 if listener.gui_socket_address() != sock:
     sys.exit('refusing to start: GUI socket isolation failed')
 
+# Never auto-detect USB/MTP devices: the sandbox must not connect to a real
+# Kobo that happens to be plugged in. Folder-as-device mounts (the simulated
+# Kobo) are handled separately by the device thread and keep working.
+from calibre.gui2 import device as gui_device  # noqa: E402
+
+_detect = gui_device.DeviceManager.detect_device
+
+
+def _sandbox_detect_device(self):
+    if self.is_device_connected and self.connected_device_kind in {'folder', 'folder-as-device'}:
+        return _detect(self)
+
+
+gui_device.DeviceManager.detect_device = _sandbox_detect_device
+
 from calibre.gui2 import gprefs  # noqa: E402
 from calibre.utils.config import config_dir  # noqa: E402
 

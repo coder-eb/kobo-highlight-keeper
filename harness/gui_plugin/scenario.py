@@ -219,6 +219,12 @@ def scenario(h):
     db = h.gui.current_db.new_api
     db.merge_annotations_for_book(REF, 'KEPUB', [OWN_VIEWER_HIGHLIGHT], user_type='local', user='viewer')
     h.shot('01-library-before')
+    m = h.khk.menu
+    m.popup(h.gui.mapToGlobal(QPoint(300, 120)))
+    yield wait(h, lambda: m.isVisible(), 5, 'menu shown')
+    h.shot('01b-menu-without-kobo', m)
+    h.check(not h.khk.sync_all_action.isEnabled(), 'without a Kobo, sync is greyed out')
+    m.hide()
 
     # 1. connect an empty Kobo
     h.connect_kobo()
@@ -229,6 +235,7 @@ def scenario(h):
     m.popup(h.gui.mapToGlobal(QPoint(300, 120)))
     yield wait(h, lambda: m.isVisible(), 5, 'menu shown')
     h.shot('02-plugin-menu', m)
+    h.check(h.khk.sync_all_action.isEnabled(), 'with a Kobo, sync is available')
     m.hide()
 
     # 2. send books the normal way (driver kepubifies; Ladies forced to EPUB)
