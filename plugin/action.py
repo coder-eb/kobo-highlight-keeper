@@ -119,11 +119,20 @@ class KoboHighlightKeeperAction(InterfaceAction):
     def show_view(self):
         from calibre_plugins.kobo_highlight_keeper.view import KoboHighlightsView
         if self._view is None:
-            self._view = KoboHighlightsView(self.gui)
+            self._view = KoboHighlightsView(self.gui, on_change=self._records_changed)
         self._view.reload(select_ids=self.gui.library_view.get_selected_ids())
         self._view.show()
         self._view.raise_()
         self._view.activateWindow()
+
+    def _records_changed(self, book_id, records):
+        """Keep the calibre viewer copies in step with edits made in the view."""
+        db = self.gui.current_db.new_api
+        fmt = store.target_format(db, book_id)
+        current = store.load_viewer_annotations(db, [book_id]).get((book_id, fmt), [])
+        new = viewer_mirrored(records, current, enabled=cfg.prefs['show_in_viewer'])
+        if new is not None:
+            store.save_viewer_annotations(db, book_id, fmt, new)
 
     def show_calibre_browser(self):
         from calibre.gui2 import gprefs

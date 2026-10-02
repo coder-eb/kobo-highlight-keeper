@@ -432,6 +432,34 @@ def scenario(h):
     yield Until(lambda: True, 1, 'render')
     h.shot('07b-annotations-browser-chapters', br)
     br.close()
+    # 10. act on highlights from the plugin's own view
+    h.gui.library_view.select_rows({REF})
+    h.khk.show_view()
+    yield wait(h, lambda: h.khk._view.isVisible(), 15, 'view')
+    v = h.khk._view
+
+    def key(book, start):
+        return next(r['kobo']['raw']['BookmarkID'] for r in v.books[book]
+                    if (r.get('highlighted_text') or '').startswith(start))
+    v.edit_note(REF, key(REF, '\u201cI\u2019m sorry'), 'Edited in the view')
+    v.delete(REF, key(REF, 'That\u2019s how'))
+    v.show_deleted.setChecked(True)
+    v.put_back(BOT, key(BOT, 'From the time'))
+    v.show_deleted.setChecked(False)
+    yield Until(lambda: True, 1, 'render')
+    h.gui.library_view.select_rows({REF})
+    v.reload(select_ids=[REF])
+    yield Until(lambda: True, 1, 'render')
+    h.shot('09-view-after-edits', v)
+    v.close()
+    QTimer.singleShot(0, lambda: h.khk.sync(None, False))
+    yield settle(h, 'sync after edits in the view')
+    h.check(h.kobo_note('\u201cI\u2019m sorry') == 'Edited in the view', 'note edited in the view reached the Kobo')
+    h.check(h.bookmark_rows('Reformatory') == 1, 'highlight deleted in the view was deleted on the Kobo')
+    h.check(h.bookmark_rows('Botchan') == 2, 'highlight put back from the view is on the Kobo again')
+    out = h.nickel('verify')
+    h.check(out.returncode == 0, 'independent check after edits in the view')
+
     h.view('main')
     yield settle(h, 'device view')
     h.shot('08-device-view-final')

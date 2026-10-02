@@ -3,15 +3,17 @@
 import html
 from datetime import datetime
 
+from calibre.gui2 import question_dialog
 from calibre.gui2.widgets2 import Dialog
 from qt.core import (
     QAbstractItemView, QApplication, QCheckBox, QDialogButtonBox, QHBoxLayout, QIcon, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QPalette, QPixmap, QSize, QSplitter, Qt, QTextBrowser, QVBoxLayout,
+    QInputDialog, QListWidget, QListWidgetItem, QPalette, QPixmap, QSize, QSplitter, Qt, QTextBrowser, QTimer,
+    QVBoxLayout,
 )
 
 from calibre_plugins.kobo_highlight_keeper import store
 from calibre_plugins.kobo_highlight_keeper.core.export import book_markdown
-from calibre_plugins.kobo_highlight_keeper.core.sync import ACTIVE, DELETED, USER, USER_TYPE
+from calibre_plugins.kobo_highlight_keeper.core.sync import ACTIVE, DELETED, USER, USER_TYPE, apply_state_style
 
 ACCENT = {'yellow': '#e3b505', 'red': '#d9436b', 'blue': '#3b82c4', 'green': '#3fa34d'}
 
@@ -19,6 +21,11 @@ ACCENT = {'yellow': '#e3b505', 'red': '#d9436b', 'blue': '#3b82c4', 'green': '#3
 def _position(rec):
     a = rec['kobo'].get('anchor') or {}
     return (a.get('spine_index', rec.get('spine_index', 1 << 30)), a.get('start', 0))
+
+
+def _now():
+    from datetime import timezone
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _date(ts):
@@ -30,8 +37,9 @@ def _date(ts):
 
 
 class KoboHighlightsView(Dialog):
-    def __init__(self, gui):
+    def __init__(self, gui, on_change=None):
         self.gui = gui
+        self.on_change = on_change  # (book_id, records): e.g. refresh the calibre viewer copies
         self.db = gui.current_db.new_api
         self.books = {}
         Dialog.__init__(self, 'Kobo Highlights', 'khk-highlights-view', parent=gui)
@@ -193,11 +201,16 @@ class KoboHighlightsView(Dialog):
     def card_html(self, book_id, rec, q, card, muted, link):
         deleted = rec['kobo']['state'] == DELETED
         date = _date(rec['timestamp'])
-        open_link = (f'<a href="open:{book_id}:{rec.get("uuid") or rec.get("title")}" '
-                     f'style="color:{link}; text-decoration:none">Open in viewer</a>')
+        key = rec['kobo']['raw'].get('BookmarkID')
+
+        def a(kind, label):
+            return f'<a href="{kind}:{book_id}:{key}" style="color:{link}; text-decoration:none">{label}</a>'
+
+        open_link = a('open', 'Open in viewer')
         if rec['type'] == 'bookmark':
             return (f'<p style="color:{muted}; margin-left:6px">🔖 Bookmark · {date}'
-                    + (f' · {open_link}' if rec.get('pos_type') == 'epubcfi' else '') + '</p>')
+                    + (f' · {open_link}' if rec.get('pos_type') == 'epubcfi' else '')
+                    + f' · {a("delete", "Delete")}</p>')
         bar = muted if deleted else ACCENT.get((rec.get('style') or {}).get('which'), ACCENT['yellow'])
         quote = self.mark(rec.get('highlighted_text') or '', q)
         if deleted:
@@ -209,9 +222,9 @@ class KoboHighlightsView(Dialog):
                     f'<i>{self.mark(rec["notes"], q)}</i></div>')
         meta = [date]
         if deleted:
-            meta.append('deleted on the Kobo')
-        meta.append(open_link)
-        meta.append(f'<a href="copy:{book_id}:{rec["uuid"]}" style="color:{link}; text-decoration:none">Copy</a>')
+            meta += ['deleted on the Kobo', a('putback', 'Put back on the Kobo')]
+        meta += [open_link, a('copy', 'Copy'), a('note', 'Edit note' if rec.get('notes') else 'Add note'),
+                 a('delete', 'Delete')]
         return (f'<table width="100%" cellspacing="0" cellpadding="0" style="margin-top:10px"><tr>'
                 f'<td bgcolor="{bar}" width="4"></td>'
                 f'<td bgcolor="{card}" style="padding:12px 14px">'
@@ -237,7 +250,7 @@ class KoboHighlightsView(Dialog):
 
     # --- actions --------------------------------------------------------------
     def find(self, book_id, key):
-        return next((r for r in self.books.get(book_id, ()) if (r.get('uuid') or r.get('title')) == key), None)
+        return next((r for r in self.books.get(book_id, ()) if r['kobo']['raw'].get('BookmarkID') == key), None)
 
     def link_clicked(self, url):
         kind, _, rest = url.toString().partition(':')
@@ -256,6 +269,53 @@ class KoboHighlightsView(Dialog):
         elif kind == 'copy':
             QApplication.clipboard().setText(self.plain(book_id, [rec]))
             self.status.setText('Copied to the clipboard')
+        elif kind == 'delete':
+            what = 'bookmark' if rec['type'] == 'bookmark' else 'highlight'
+            text = ' '.join((rec.get('highlighted_text') or '').split())[:120]
+            if question_dialog(self, f'Delete {what}?',
+                               f'Delete this {what} from calibre and from the Kobo?'
+                               + (f'<br><br><i>{html.escape(text)}</i>' if text else '')
+                               + '<br><br>The Kobo is updated at the next <b>Sync with Kobo now</b>.'):
+                self.delete(book_id, key)
+        elif kind == 'note':
+            text, ok = QInputDialog.getMultiLineText(self, 'Note', 'Note for this highlight:', rec.get('notes') or '')
+            if ok and text.strip() != (rec.get('notes') or '').strip():
+                self.edit_note(book_id, key, text.strip())
+        elif kind == 'putback':
+            self.put_back(book_id, key)
+
+    # --- changes (calibre now, the Kobo at the next full sync) ------------------
+    def delete(self, book_id, key):
+        def tombstone(r):
+            mark = {'removed': True, 'type': r['type'], 'timestamp': _now()}
+            mark['uuid' if r['type'] == 'highlight' else 'title'] = r.get('uuid') or r.get('title')
+            return mark
+        self.change(book_id, key, tombstone, 'Deleted')
+
+    def edit_note(self, book_id, key, text):
+        self.change(book_id, key, lambda r: dict(r, notes=text, timestamp=_now()),
+                    'Note saved' if text else 'Note removed')
+
+    def put_back(self, book_id, key):
+        def reactivate(r):
+            r['kobo'].update(state=ACTIVE, on_device=False)
+            apply_state_style(r)
+            return r
+        self.change(book_id, key, reactivate, 'Will be put back')
+
+    def change(self, book_id, key, fn, done):
+        records = []
+        for r in store.load_records(self.db, book_id):  # includes calibre's deletion markers
+            if 'kobo' in r and r['kobo']['raw'].get('BookmarkID') == key:
+                r = fn(r)
+            records.append(r)
+        store.save_records(self.db, book_id, records)
+        if self.on_change is not None:
+            self.on_change(book_id, records)
+        scroll = self.page.verticalScrollBar().value()
+        self.reload(select_ids=[book_id])
+        QTimer.singleShot(0, lambda: self.page.verticalScrollBar().setValue(scroll))
+        self.status.setText(f'{done}; the Kobo is updated at the next Sync with Kobo now')
 
     def plain(self, book_id, recs):
         title = self.db.field_for('title', book_id)
