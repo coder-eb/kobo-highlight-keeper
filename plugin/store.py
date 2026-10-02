@@ -25,6 +25,19 @@ def load_all_records(db, book_ids):
     return out
 
 
+def load_viewer_annotations(db, book_ids):
+    """calibre viewer annotations in one query: {(book_id, FORMAT): [annotations]}."""
+    out = {}
+    for a in db.all_annotations(restrict_to_user=('local', 'viewer'), restrict_to_book_ids=set(book_ids)):
+        out.setdefault((a['book_id'], a['format'].upper()), []).append(a['annotation'])
+    return out
+
+
+def save_viewer_annotations(db, book_id, fmt, annots):
+    alist = [(a, (parse_iso8601(a['timestamp'], assume_utc=True) - EPOCH).total_seconds()) for a in annots]
+    db.set_annotations_for_book(book_id, fmt, alist, user_type='local', user='viewer')
+
+
 def target_format(db, book_id):
     fmts = db.formats(book_id) or ()
     for f in ('KEPUB', 'EPUB'):

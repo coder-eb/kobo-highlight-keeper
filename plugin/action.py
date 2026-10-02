@@ -13,6 +13,8 @@ from calibre_plugins.kobo_highlight_keeper import config as cfg
 from calibre_plugins.kobo_highlight_keeper import store
 from calibre_plugins.kobo_highlight_keeper.core.engine import summarize
 from calibre_plugins.kobo_highlight_keeper.core.export import book_markdown
+from calibre_plugins.kobo_highlight_keeper.core.viewer import feedback as viewer_feedback
+from calibre_plugins.kobo_highlight_keeper.core.viewer import mirrored as viewer_mirrored
 from calibre_plugins.kobo_highlight_keeper.devicejob import run_sync
 
 
@@ -114,9 +116,15 @@ class KoboHighlightKeeperAction(InterfaceAction):
                 continue
             found.append((book_id, path))
         records = store.load_all_records(db, [i for i, _ in found])
+        viewer = store.load_viewer_annotations(db, [i for i, _ in found])
         tasks = []
         for i, p in found:
             fmt = store.target_format(db, i)
+            # Notes edited / highlights deleted in calibre's viewer go to the Kobo in this sync.
+            recs, changed = viewer_feedback(records.get(i, []), viewer.get((i, fmt), []))
+            if changed:
+                store.save_records(db, i, recs)
+                records[i] = recs
             lib = db.format_abspath(i, fmt)
             tasks.append({'key': i, 'title': db.field_for('title', i), 'path': p, 'records': records.get(i, []),
                           'library_path': lib, 'viewer_spine_offset': partial(viewer_spine_offset, lib, fmt)})
@@ -154,6 +162,7 @@ class KoboHighlightKeeperAction(InterfaceAction):
             plan = r.get('plan')
             if plan is not None and plan.changed:
                 store.save_records(db, r['key'], plan.all_records())
+        self._refresh_viewer_mirrors(db, out['results'])
         unmatched = getattr(out['results'], 'unmatched', [])
         if unmatched:
             cfg.save_unmatched(unmatched)
@@ -170,6 +179,20 @@ class KoboHighlightKeeperAction(InterfaceAction):
         self.gui.status_bar.show_message(msg, 15000)
         if interactive:
             self.show_report()
+
+    def _refresh_viewer_mirrors(self, db, results):
+        ids = [r['key'] for r in results if r.get('plan') is not None]
+        if not ids:
+            return
+        viewer = store.load_viewer_annotations(db, ids)
+        for r in results:
+            if r.get('plan') is None:
+                continue
+            fmt = store.target_format(db, r['key'])
+            new = viewer_mirrored(r['plan'].all_records(), viewer.get((r['key'], fmt), []),
+                                  enabled=cfg.prefs['show_in_viewer'])
+            if new is not None:
+                store.save_viewer_annotations(db, r['key'], fmt, new)
 
     # --- library ----------------------------------------------------------------
     def show_report(self):

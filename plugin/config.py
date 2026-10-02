@@ -7,6 +7,7 @@ prefs = JSONConfig('plugins/Kobo Highlight Keeper')
 prefs.defaults['auto_sync'] = True
 prefs.defaults['backup_dir'] = ''
 prefs.defaults['keep_backups'] = 20
+prefs.defaults['show_in_viewer'] = True
 
 DATA_DIR = os.path.join(config_dir, 'plugins', 'Kobo Highlight Keeper')
 REPORT_FILE = os.path.join(DATA_DIR, 'sync-report.txt')
@@ -72,6 +73,10 @@ class ConfigWidget(QWidget):
         self.auto_sync = QCheckBox('Sync automatically whenever a Kobo is connected')
         self.auto_sync.setChecked(prefs['auto_sync'])
         lay.addRow(self.auto_sync)
+        self.show_in_viewer = QCheckBox("Show Kobo highlights in calibre's viewer")
+        self.show_in_viewer.setChecked(prefs['show_in_viewer'])
+        self.show_in_viewer.setToolTip('Notes edited or highlights deleted in the viewer are sent to the Kobo too.')
+        lay.addRow(self.show_in_viewer)
         lay.addRow(QLabel(
             'Sync pulls new and changed annotations from the Kobo into calibre, and restores\n'
             'annotations the Kobo has lost (deleted/re-sent/re-converted books).\n'
@@ -86,5 +91,6 @@ class ConfigWidget(QWidget):
 
     def save_settings(self):
         prefs['auto_sync'] = self.auto_sync.isChecked()
+        prefs['show_in_viewer'] = self.show_in_viewer.isChecked()
         prefs['backup_dir'] = self.backup.text().strip()
         prefs['keep_backups'] = self.keep.value()

@@ -24,6 +24,11 @@ LOG = os.path.join(SANDBOX, 'run', 'scenario.log')
 NICKEL = os.path.join(os.path.dirname(SANDBOX), 'harness', 'fake_nickel.py')
 PLUGIN = 'Kobo Highlight Keeper'
 
+OWN_VIEWER_HIGHLIGHT = {
+    'type': 'highlight', 'uuid': 'made-in-the-viewer', 'timestamp': '2026-01-01T10:00:00.000Z',
+    'highlighted_text': 'a highlight made in calibre\u2019s viewer', 'spine_index': 5,
+    'spine_name': 'x.xhtml', 'start_cfi': '/2/4/2/1:0', 'end_cfi': '/2/4/2/1:10'}
+
 REFORMATORY = [
     ('His hope that she would say something to him died before it was fully awake.', None),
     ('That’s how fast she was gone. Always.', 'the ghost of his mother'),
@@ -173,6 +178,11 @@ class HarnessAction(InterfaceAction):
         with open(os.path.join(out, 'calibre-book-manifest.json')) as f:
             return json.load(f)['spine']
 
+    def viewer_annotations(self, book_id):
+        db = self.gui.current_db.new_api
+        return [a['annotation'] for a in db.all_annotations(restrict_to_user=('local', 'viewer'),
+                                                             restrict_to_book_ids={book_id})]
+
     def kobo_note(self, text_start):
         con = sqlite3.connect(os.path.join(KOBO, '.kobo', 'KoboReader.sqlite'))
         row = con.execute('SELECT Annotation FROM Bookmark WHERE Text LIKE ?', (text_start + '%',)).fetchone()
@@ -206,6 +216,8 @@ def scenario(h):
     books = json.load(open(os.path.join(SANDBOX, 'books.json')))
     REF, LAD, BOT = books['890'], books['859'], books['852']
     log('=== scenario start; sandbox books', books)
+    db = h.gui.current_db.new_api
+    db.merge_annotations_for_book(REF, 'KEPUB', [OWN_VIEWER_HIGHLIGHT], user_type='local', user='viewer')
     h.shot('01-library-before')
 
     # 1. connect an empty Kobo
@@ -267,6 +279,11 @@ def scenario(h):
                  viewer_spine[r['spine_index']] == r['spine_name'] for r in highlights)
         h.check(ok and highlights, f'{fmt} book {book_id}: viewer positions point at the right chapters '
                                    f'(viewer spine has {len(viewer_spine)} items)')
+    vr = h.viewer_annotations(REF)
+    mirrors = [a for a in vr if a.get('kobo_mirror') and not a.get('removed')]
+    h.check(len(mirrors) == 3 and all(m.get('start_cfi') for m in mirrors),
+            "Reformatory's 3 Kobo highlights are in calibre's viewer annotations")
+    h.check(any(a.get('uuid') == 'made-in-the-viewer' for a in vr), 'own viewer highlight untouched')
 
     h.gui.iactions['Browse Annotations'].show_browser()
     yield wait(h, lambda: h.window('annotations') is not None, 15, 'annotations browser')
@@ -333,6 +350,15 @@ def scenario(h):
     db.delete_annotations([to_delete['id']])
     db.update_annotations({to_edit['id']: dict(to_edit['annotation'], notes='Edited in calibre')})
     log('calibre: deleted one Reformatory highlight, edited one note')
+    # ... and in calibre's viewer: edit a note on one mirrored highlight, delete another
+    later = '2099-01-01T00:00:00+00:00'
+    sorry = next(a for a in h.viewer_annotations(REF) if (a.get('highlighted_text') or '').startswith('\u201cI\u2019m sorry'))
+    db.merge_annotations_for_book(REF, 'KEPUB', [dict(sorry, notes='Edited in the viewer', timestamp=later)],
+                                  user_type='local', user='viewer')
+    mother = next(a for a in h.viewer_annotations(BOT) if (a.get('highlighted_text') or '').startswith('After my mother'))
+    db.merge_annotations_for_book(BOT, 'KEPUB', [{'removed': True, 'uuid': mother['uuid'], 'type': 'highlight',
+                                                  'timestamp': later}], user_type='local', user='viewer')
+    log('viewer: edited one note, deleted one highlight')
 
     # 9. manual sync from the menu sends both and shows the report
     QTimer.singleShot(0, lambda: h.khk.sync(None, True))
@@ -343,6 +369,12 @@ def scenario(h):
     dlg.reject()
     h.check(h.bookmark_rows('Reformatory') == 2, 'highlight deleted in calibre was deleted on the Kobo')
     h.check(h.kobo_note('That') == 'Edited in calibre', 'note edited in calibre was sent to the Kobo')
+    h.check(h.kobo_note('\u201cI\u2019m sorry') == 'Edited in the viewer', 'note edited in the viewer was sent to the Kobo')
+    h.check(h.bookmark_rows('Botchan') == 1, 'highlight deleted in the viewer was deleted on the Kobo (dogear stays)')
+    live = [a for a in h.viewer_annotations(REF) if a.get('kobo_mirror') and not a.get('removed')]
+    h.check(len(live) == 2 and all(a['highlighted_text'].startswith(('That\u2019s how', '\u201cI\u2019m sorry'))
+                                   for a in live),
+            'viewer mirrors follow deletions made in calibre')
     out = h.nickel('verify')
     h.check(out.returncode == 0, 'independent check after calibre-side changes')
     QTimer.singleShot(0, lambda: h.khk.sync(None, False))

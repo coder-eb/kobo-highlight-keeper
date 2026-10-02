@@ -62,6 +62,15 @@ Positions follow calibre's own CFI rules (`src/pyj/read_book/cfi.pyj`):
 - **Chapter numbers** include the cover page calibre's viewer inserts before
   KEPUBs (`calibre.srv.render_book.create_cover_page`).
 
+**In calibre's viewer** (setting, on by default): calibre's viewer only
+shows its own annotation set, so active Kobo highlights are mirrored into it,
+tagged `kobo_mirror` and sharing the Kobo highlight's ID.
+- Highlights you made in the viewer yourself are never touched.
+- A note edited or a highlight deleted *in the viewer* on a mirrored
+  highlight goes back to the Kobo record, and to the Kobo on the next sync.
+- Turning the setting off removes the mirrors.
+- Dogears aren't mirrored.
+
 `calibre-debug -e harness/verify_cfi.py` checks positions with a port of
 calibre's decoder on books as calibre parses them: 1,982 of 1,982 decoded
 to the exact passage. The GUI scenario checks chapter numbers against
