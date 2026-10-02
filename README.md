@@ -130,6 +130,25 @@ harness/                 sandbox + simulated Kobo + scripted GUI test
 tests/                   unit + lifecycle tests
 ```
 
+## Releases
+
+Download the zip from the repo's **Releases** page and install it in calibre
+(Preferences → Plugins → **Load plugin from file**).
+
+To publish a release: bump `version` in `plugin/__init__.py`, commit, then
+tag and push:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+`.github/workflows/release.yml` checks the tag matches the plugin version,
+runs the tests, builds `Kobo-Highlight-Keeper-<version>.zip` and publishes
+the release with the commit list since the previous tag.
+
+On GitHub the tests that need copies of real books skip themselves, because
+the sandbox isn't in the repo. Run the full suite locally before tagging.
+
 ## Build and install
 
 ```bash

@@ -1,0 +1,53 @@
+# Push a tag like v0.2.0 to publish a release with the plugin zip attached.
+# The tag must match `version` in plugin/__init__.py.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check the tag matches the plugin version
+        run: |
+          version=$(python scripts/build_plugin.py --version)
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match plugin version ${version} (plugin/__init__.py)"
+            exit 1
+          fi
+
+      # Tests that need the sandbox's copies of real books skip themselves here.
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build plugin zip
+        run: |
+          python scripts/build_plugin.py
+          cp dist/Kobo-Highlight-Keeper.zip "dist/Kobo-Highlight-Keeper-${GITHUB_REF_NAME#v}.zip"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          {
+            echo "Install: calibre → Preferences → Plugins → **Load plugin from file** → \`Kobo-Highlight-Keeper-${GITHUB_REF_NAME#v}.zip\`, then restart calibre."
+            echo
+            echo "## Changes"
+            git log --pretty='- %s' ${prev:+"${prev}..${GITHUB_REF_NAME}"}
+          } > notes.md
+          gh release create "${GITHUB_REF_NAME}" "dist/Kobo-Highlight-Keeper-${GITHUB_REF_NAME#v}.zip" \
+            --title "Kobo Highlight Keeper ${GITHUB_REF_NAME#v}" --notes-file notes.md

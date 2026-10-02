@@ -1,3 +1,4 @@
-"""Kobo Highlight Keeper: keep Kobo highlights in calibre and restore them to the device."""
+"""Kobo Highlight Keeper: keep Kobo highlights in calibre and restore them to the device.
 
-__version__ = (0, 1, 0)
+The plugin version lives in plugin/__init__.py (KoboHighlightKeeperPlugin.version).
+"""
