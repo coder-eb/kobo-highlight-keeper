@@ -154,6 +154,7 @@ class TestLifecycle(unittest.TestCase):
         self.dev.nickel('import')
         plan, records, backups = self.dev.sync(path, records)
         self.assertEqual(len(plan.to_insert), 3)
+        self.assertTrue(all('same position' in line for line in plan.log if line.startswith('restore')))
         self.assertEqual(len(backups), 1)
         self.assertEqual({r['kobo']['raw']['BookmarkID'] for r in records}, ids)
         self.dev.nickel('verify')

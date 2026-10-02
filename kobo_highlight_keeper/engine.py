@@ -16,28 +16,43 @@ def sync_books(conn, mount, tasks, backup=None):
 
     Returns [{'key', 'title', 'plan'|'error'}]. Device rows are written on
     ``conn`` (the caller commits); ``backup()`` runs once before any write.
+
+    Cost: two queries for the whole device; a book file is opened only when
+    one of its annotations is new, edited, missing or its file changed.
     """
     indexed_books = kobodb.sideloaded_books(conn)
+    rows_by_volume = kobodb.bookmarks_by_volume(conn)
     results = []
     for t in tasks:
         path = Path(t['path'])
         vid = kobodb.volume_id_for(mount, path)
+        rows = rows_by_volume.get(vid, [])
+        if not rows and not t['records']:
+            continue
         try:
-            book = Book(path)
+            st = path.stat()
+        except OSError as e:
+            results.append({'key': t['key'], 'title': t.get('title'), 'error': f'{path.name}: {e}'})
+            continue
+        opened = {}
+
+        def get_book(path=path, opened=opened):
+            if 'book' not in opened:
+                opened['book'] = Book(path)
+            return opened['book']
+
+        def chapter_id_for(book, href, vid=vid):
+            return kobodb.chapter_content_id(conn, vid, book, href)
+
+        fmt = 'kepub' if path.name.lower().endswith('.kepub.epub') else 'epub'
+        try:
+            plan = reconcile(get_book, fmt, vid, [st.st_size, int(st.st_mtime)], rows, t['records'],
+                             chapter_id_for, device_indexed=vid in indexed_books)
         except Exception as e:  # unreadable / DRM / not an epub
             results.append({'key': t['key'], 'title': t.get('title'), 'error': f'{path.name}: {e}'})
             continue
-        rows = kobodb.bookmarks(conn, vid)
-        if not rows and not t['records']:
-            continue
-        indexed = vid in indexed_books and bool(kobodb.chapter_content_ids(conn, vid))
-
-        def chapter_id_for(href, vid=vid, book=book):
-            return kobodb.chapter_content_id(conn, vid, book, href)
-
-        plan = reconcile(book, 'kepub' if book.is_kepub else 'epub', vid, path.stat().st_size,
-                         rows, t['records'], chapter_id_for, device_indexed=indexed)
-        results.append({'key': t['key'], 'title': t.get('title') or book.title, 'plan': plan})
+        plan.opened_file = 'book' in opened
+        results.append({'key': t['key'], 'title': t.get('title') or path.name, 'plan': plan})
 
     if backup and any(r.get('plan') and r['plan'].device_writes for r in results):
         backup()

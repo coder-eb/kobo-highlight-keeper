@@ -14,6 +14,15 @@ def load_records(db, book_id):
     return [a['annotation'] for a in db.all_annotations_for_book(book_id) if _ours(a)]
 
 
+def load_all_records(db, book_ids):
+    """Kobo records for many books in a single query: {book_id: [records]}."""
+    out = {}
+    for a in db.all_annotations(restrict_to_user=(USER_TYPE, USER), restrict_to_book_ids=set(book_ids)):
+        if 'kobo' in a['annotation']:
+            out.setdefault(a['book_id'], []).append(a['annotation'])
+    return out
+
+
 def target_format(db, book_id):
     fmts = db.formats(book_id) or ()
     for f in ('KEPUB', 'EPUB'):

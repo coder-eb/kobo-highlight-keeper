@@ -20,10 +20,23 @@ library:
    If *all* of a book's highlights vanished, or the file changed, that's a
    re-import wipe, so they're restored.
 3. **Restore.** Highlights calibre has but the Kobo doesn't are written back
-   to `KoboReader.sqlite`. The plugin finds the highlighted text again in the
-   file that's actually on the device, so it works across kepub/epub and after
-   edits. If the text can't be found, the highlight is reported as an
-   **orphan** and never placed in the wrong spot.
+   to `KoboReader.sqlite`. Each one is located in the file that's actually on
+   the device, in this order (the same cascade as the W3C Web Annotation
+   model and Hypothesis):
+   1. its original Kobo position, if that still points at the same text
+      (the usual case: the same book re-sent), reused unchanged
+   2. an exact text search in its own chapter, using the surrounding words
+      and its old position to choose between repeats
+   3. the rest of the book (chapters split or renamed)
+   4. a fuzzy match for edited text: short pieces of the passage vote for
+      likely spots, which are then checked with an alignment. It tolerates
+      edits anywhere in the passage and needs at least 32 characters and 75%
+      similarity (85% under 80 characters).
+   5. otherwise it's reported as an **orphan** and never placed in the wrong
+      spot
+
+   In stress tests on three real books: 0 false matches in 3,000 cross-book
+   searches, and 566 of 568 randomly edited passages placed correctly.
 4. **Repair.** Highlights still on the Kobo whose location no longer points
    at their text (span ids shifted after re-conversion) are moved to the
    right place.
@@ -45,6 +58,24 @@ Each annotation is a normal calibre annotation, plus a `kobo` key that holds:
   characters of text before and after, and its offset
 
 See `kobo_highlight_keeper/sync.py` for the full format.
+
+## Performance
+
+The automatic sync runs once per connection. It reads the whole device with
+two queries and calibre with one, and a book file is opened only when one of
+its annotations is new, edited or missing, or the file changed (tracked by
+size and modification time). calibre is written only when something actually
+changed. `python3 harness/bench.py` (200 books on the device, 30 with 25
+highlights each):
+
+| Case | Time |
+|---|---|
+| Connect, nothing changed (the everyday case) | 0.05 s, no writes |
+| Restore 5 wiped books | 0.20 s |
+| First sync of 750 highlights (one-off) | 0.9 s |
+
+Times are on a Mac SSD; over USB the first two stay small because they
+barely touch book files.
 
 ## Layout
 
@@ -72,7 +103,8 @@ and config:
 ```bash
 python3 harness/setup_sandbox.py --force   # new library with copies of 3 real books,
                                            # empty simulated Kobo Clara BW, separate config
-python3 -m unittest discover -s tests -v   # anchors + full lifecycle against the fake Kobo
+python3 -m unittest discover -s tests -v   # anchors, fuzzy matching, full lifecycle
+python3 harness/bench.py                   # sync timings on a 200-book simulated Kobo
 python3 harness/run_gui.py                 # scripted run of the real calibre GUI, offscreen,
                                            # screenshots in sandbox/screenshots/
 ```

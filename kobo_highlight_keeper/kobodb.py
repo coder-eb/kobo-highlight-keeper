@@ -44,6 +44,14 @@ def bookmarks(con, volume_id):
     return [dict(r) for r in con.execute('SELECT * FROM Bookmark WHERE VolumeID = ?', (volume_id,))]
 
 
+def bookmarks_by_volume(con):
+    """Every Bookmark row in one query, grouped by VolumeID."""
+    out = {}
+    for r in con.execute('SELECT * FROM Bookmark'):
+        out.setdefault(r['VolumeID'], []).append(dict(r))
+    return out
+
+
 def is_hidden(row):
     return str(row.get('Hidden')).strip().lower() in ('true', '1')
 

@@ -96,14 +96,42 @@ class TestAnchors(unittest.TestCase):
         m = A.locate(b, an)
         self.assertEqual(A.normalize(ch.text[m['start']:m['end']]), an['exact'])
 
-    def test_fuzzy_when_middle_edited(self):
+    def edited_anchor(self, edit):
+        """Anchor for a real passage whose stored text is edited by ``edit``."""
         b, = books('852/*.kepub')
         ch = max(b.chapters(), key=lambda c: len(c.text))
         an = A.make_anchor(ch, 1000, 1200)
-        an = dict(an, exact=an['exact'][:90] + ' typo fixed ' + an['exact'][100:])
-        m = A.locate(b, an)
-        self.assertIsNotNone(m)
-        self.assertEqual(m['method'], 'fuzzy')
+        norm, idx = A.chapter_norm(ch)
+        true_start = A._raw_to_norm(idx, 1000)
+        return b, ch, dict(an, exact=A.normalize(edit(an['exact']))), true_start
+
+    def test_fuzzy_tolerates_edits_anywhere(self):
+        edits = {
+            'middle': lambda t: t[:90] + ' typo fixed ' + t[100:],
+            'start': lambda t: 'Edited opening words, ' + t[12:],
+            'end': lambda t: t[:-15] + ' and a new ending.',
+            'insert': lambda t: t[:60] + ' (an inserted aside) ' + t[60:],
+            'delete': lambda t: t[:50] + t[75:],
+        }
+        for name, edit in edits.items():
+            with self.subTest(edit=name):
+                b, ch, an, true_start = self.edited_anchor(edit)
+                m = A.locate(b, an)
+                self.assertIsNotNone(m, name)
+                self.assertEqual(m['method'], 'fuzzy')
+                got = A._raw_to_norm(A.chapter_norm(ch)[1], m['start'])
+                self.assertLess(abs(got - true_start), 25, f'{name}: placed {got - true_start} chars off')
+
+    def test_fuzzy_never_matches_another_books_text(self):
+        """No false positives: passages from Botchan must not fuzzy-match in The Reformatory."""
+        src, = books('852/*.kepub')
+        dst, = books('890/*.kepub')
+        dst_norms = [A.chapter_norm(c)[0] for c in dst.chapters()]
+        for _ in range(N):
+            ch, s, e = self.sample(src)
+            exact = A.make_anchor(ch, s, e)['exact']
+            for norm in dst_norms:
+                self.assertIsNone(A.fuzzy_find(norm, exact), exact[:60])
 
     def test_unfindable_text_is_orphan(self):
         b, = books('852/*.kepub')

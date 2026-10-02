@@ -57,6 +57,8 @@ class KoboHighlightKeeperAction(InterfaceAction):
         m.addSeparator()
         self.create_menu_action(m, 'khk-config', 'Settings…', icon='config.png',
                                 triggered=lambda: self.interface_action_base_plugin.do_user_config(self.gui))
+        self._synced_this_connection = False
+        device_signals.device_connection_changed.connect(self._connection_changed)
         device_signals.device_metadata_available.connect(self._metadata_available)
 
     # --- device ---------------------------------------------------------------
@@ -67,26 +69,35 @@ class KoboHighlightKeeperAction(InterfaceAction):
             return dev
         return None
 
+    def _connection_changed(self, connected):
+        if not connected:
+            self._synced_this_connection = False
+
     def _metadata_available(self):
-        if cfg.prefs['auto_sync'] and self.kobo() is not None:
-            # Let calibre finish matching device books to the library first.
-            QTimer.singleShot(250, partial(self.sync, None, False))
+        # calibre emits this after every booklist refresh (each send/delete);
+        # auto-sync only on the first one per connection.
+        if self._synced_this_connection or not cfg.prefs['auto_sync'] or self.kobo() is None:
+            return
+        self._synced_this_connection = True
+        # Let calibre finish matching device books to the library first.
+        QTimer.singleShot(250, partial(self.sync, None, False))
 
     def _tasks(self, only_ids):
         db = self.gui.current_db.new_api
-        tasks = []
+        found = []
         for book in self.gui.memory_view.model().db or ():
             path = getattr(book, 'path', '') or ''
-            if not path.lower().endswith('.epub') or not os.path.exists(path):
+            if not path.lower().endswith('.epub'):
                 continue
             book_id = getattr(book, 'application_id', None)
             if book_id is None and getattr(book, 'uuid', None):
                 book_id = db.lookup_by_uuid(book.uuid)
             if book_id is None or (only_ids is not None and book_id not in only_ids):
                 continue
-            tasks.append({'key': book_id, 'title': db.field_for('title', book_id), 'path': path,
-                          'records': store.load_records(db, book_id)})
-        return tasks
+            found.append((book_id, path))
+        records = store.load_all_records(db, [i for i, _ in found])
+        return [{'key': i, 'title': db.field_for('title', i), 'path': p, 'records': records.get(i, [])}
+                for i, p in found]
 
     def sync_selected(self):
         ids = set(self.gui.library_view.get_selected_ids())

@@ -11,8 +11,8 @@ user='kobo') with everything Kobo-specific under the 'kobo' key:
    'highlighted_text': ..., 'notes': ..., 'style': {...},
    'kobo': {'v': 1, 'state': 'active'|'deleted_on_device'|'replaced',
             'raw': {<every Bookmark column>}, 'anchor': {...},
-            'format': 'kepub'|'epub', 'volume_id': ..., 'file_size': ...,
-            'on_device': bool, 'last_seen': <ISO>, 'history': [...]}}
+            'format': 'kepub'|'epub', 'volume_id': ..., 'file_sig': [size, mtime],
+            'on_device': bool, 'history': [...]}}
 
 Dogears (Kobo bookmarks without text) are stored as calibre 'bookmark'
 annotations titled 'Kobo dogear <id>' with the same 'kobo' payload.
@@ -94,11 +94,11 @@ def apply_state_style(rec):
         rec['style'] = STRIKEOUT if rec['kobo']['state'] == DELETED else color_style(rec['kobo']['raw'])
 
 
-def row_to_record(row, anchor, book_format, volume_id, file_size):
+def row_to_record(row, anchor, book_format, volume_id, file_sig):
     kobo = {
         'v': 1, 'state': ACTIVE, 'raw': dict(row), 'anchor': anchor,
-        'format': book_format, 'volume_id': volume_id, 'file_size': file_size,
-        'on_device': True, 'last_seen': now_iso(), 'history': [],
+        'format': book_format, 'volume_id': volume_id, 'file_sig': file_sig,
+        'on_device': True, 'history': [],
     }
     ts = kobo_ts(row.get('DateModified') or row.get('DateCreated'))
     if is_dogear(row):
@@ -138,20 +138,30 @@ def location_ok(book, row, anchor=None):
     return A.normalize(ch.text[s:e]) == A.normalize(row.get('Text') or '')
 
 
-def reconcile(book, book_format, volume_id, file_size, device_rows, records,
+LOCATION_KEYS = ('ContentID', 'StartContainerPath', 'StartOffset', 'EndContainerPath', 'EndOffset')
+CONTENT_KEYS = ('Text', 'Annotation', 'DateModified', 'Color', 'Type')
+
+
+def reconcile(get_book, book_format, volume_id, file_sig, device_rows, records,
               chapter_id_for, device_indexed=True):
     """Plan for one book.
 
-    book            epubtext.Book of the file currently on the device
+    get_book        callable -> epubtext.Book of the file on the device. Only
+                    called when a step needs the text (new, edited or missing
+                    annotations, or the file changed), so an unchanged book
+                    costs no file I/O at all.
+    file_sig        [size, mtime] of that file; locations are re-checked only
+                    when it differs from the one recorded at the last sync.
     device_rows     all Bookmark rows for volume_id (incl. hidden)
     records         stored records for this calibre book (any state)
-    chapter_id_for  callable(href) -> Kobo chapter ContentID
+    chapter_id_for  callable(book, href) -> Kobo chapter ContentID
     device_indexed  False when Kobo hasn't indexed the file yet (just sent)
     """
     plan = Plan(records={record_key(r): copy.deepcopy(r) for r in records})
     by_bid = {bookmark_id(r): k for k, r in plan.records.items()}
     visible = {r['BookmarkID']: r for r in device_rows if not is_hidden(r)}
     hidden = {r['BookmarkID'] for r in device_rows if is_hidden(r)}
+    to_validate = []
 
     # 1. Pull: device -> calibre.
     for bid, row in visible.items():
@@ -160,8 +170,8 @@ def reconcile(book, book_format, volume_id, file_size, device_rows, records,
             continue
         key = by_bid.get(bid)
         if key is None:
-            anchor = anchor_for_row(book, row)
-            rec = row_to_record(row, anchor, book_format, volume_id, file_size)
+            anchor = anchor_for_row(get_book(), row)
+            rec = row_to_record(row, anchor, book_format, volume_id, file_sig)
             k = record_key(rec)
             # Same passage re-highlighted after a wipe: the new row wins.
             for other in plan.records.values():
@@ -179,31 +189,32 @@ def reconcile(book, book_format, volume_id, file_size, device_rows, records,
         rec = plan.records[key]
         kobo = rec['kobo']
         old = kobo['raw']
+        changed = False
         if kobo['state'] != ACTIVE:
             kobo['state'] = ACTIVE  # present on device again: it is active
             kobo['history'].append({'at': now_iso(), 'event': 'reactivated'})
-        newer = kobo_ts(row.get('DateModified')) > kobo_ts(old.get('DateModified'))
-        if newer or row.get('Annotation') != old.get('Annotation') or row.get('Text') != old.get('Text'):
-            kobo['raw'] = dict(row)
+            changed = True
+        if any(row.get(c) != old.get(c) for c in CONTENT_KEYS):
             if rec['type'] == 'highlight':
                 rec['highlighted_text'] = row.get('Text') or ''
                 rec['notes'] = row.get('Annotation') or ''
             rec['timestamp'] = kobo_ts(row.get('DateModified') or row.get('DateCreated'))
             plan.log.append(f'updated from device: {(row.get("Text") or "")[:50]!r}')
-        if location_ok(book, row, kobo.get('anchor')):
-            fresh = anchor_for_row(book, row)
-            if fresh:
-                kobo['anchor'] = fresh
-        kobo.update(on_device=True, last_seen=now_iso(), volume_id=volume_id,
-                    file_size=file_size, format=book_format)
-        plan.changed.add(key)
+            changed = True
+        moved = any(row.get(c) != old.get(c) for c in LOCATION_KEYS)
+        if moved or kobo.get('file_sig') != file_sig:
+            to_validate.append(bid)  # checked (and refreshed or repaired) in step 4
+            changed = True
+        if changed or not kobo.get('on_device') or kobo.get('volume_id') != volume_id:
+            kobo['raw'] = dict(row)
+            kobo.update(on_device=True, volume_id=volume_id, file_sig=file_sig, format=book_format)
+            plan.changed.add(key)
 
-    # 2. Deletions on the device.
+    # 2. Deletions on the device (no file access needed).
     prev_on = [k for k, r in plan.records.items()
                if r['kobo']['state'] == ACTIVE and r['kobo'].get('on_device')]
     missing = [k for k in prev_on if bookmark_id(plan.records[k]) not in visible]
-    file_changed = any(plan.records[k]['kobo'].get('file_size') not in (None, file_size)
-                       for k in prev_on)
+    file_changed = any(plan.records[k]['kobo'].get('file_sig') not in (None, file_sig) for k in missing)
     wiped = bool(prev_on) and (len(missing) == len(prev_on) or file_changed)
     for k in missing:
         rec = plan.records[k]
@@ -224,42 +235,62 @@ def reconcile(book, book_format, volume_id, file_size, device_rows, records,
         if not device_indexed:
             plan.pending.append(k)
             continue
+        book = get_book()
+        row = dict(kobo['raw'])
+        hit = A.resolve_row(book, row)
+        if hit and location_ok(book, row, kobo.get('anchor')):
+            # 1st choice: the original Kobo position still points at this
+            # text (e.g. the same file re-sent): reuse it, no search at all.
+            row.update(VolumeID=volume_id, ContentID=chapter_id_for(book, hit[0].href), Hidden='false')
+            plan.to_insert.append(row)
+            kobo['raw'] = row
+            kobo.update(on_device=True, volume_id=volume_id, file_sig=file_sig, format=book_format)
+            kobo['history'].append({'at': now_iso(), 'event': 'restored', 'method': 'same-position'})
+            plan.changed.add(k)
+            plan.log.append(f'restore (same position): {(rec.get("highlighted_text") or "dogear")[:50]!r}')
+            continue
+        # 2nd: find the text (own chapter first, then the rest of the book).
         m = A.locate(book, kobo.get('anchor') or {}) if kobo.get('anchor') else None
         if m is None:
             plan.orphans.append(k)
-            kobo['on_device'] = False
-            plan.changed.add(k)
+            if kobo.get('on_device'):
+                kobo['on_device'] = False
+                plan.changed.add(k)
             plan.log.append(f'ORPHAN (text not found, not restored): {rec.get("highlighted_text", "")[:60]!r}')
             continue
         row = dict(kobo['raw'])
         row.update(A.to_kobo_location(book, m['chapter'], m['start'], m['end']))
-        row.update(VolumeID=volume_id, ContentID=chapter_id_for(m['chapter'].href), Hidden='false')
+        row.update(VolumeID=volume_id, ContentID=chapter_id_for(book, m['chapter'].href), Hidden='false')
         if m['method'] == 'fuzzy':
             row['Text'] = m['chapter'].text[m['start']:m['end']]
         plan.to_insert.append(row)
         kobo['raw'] = row
-        kobo.update(on_device=True, volume_id=volume_id, file_size=file_size, format=book_format)
+        kobo.update(on_device=True, volume_id=volume_id, file_sig=file_sig, format=book_format)
         kobo['history'].append({'at': now_iso(), 'event': 'restored', 'method': m['method']})
         plan.changed.add(k)
         plan.log.append(f'restore ({m["method"]}): {(rec.get("highlighted_text") or "dogear")[:50]!r}')
 
-    # 4. Repair rows still on the device whose location no longer matches.
-    for bid, row in visible.items():
-        key = by_bid.get(bid)
-        if key is None or location_ok(book, row, plan.records[key]['kobo'].get('anchor')):
-            continue
+    # 4. Re-check rows whose location or file changed; refresh or repair.
+    for bid in to_validate:
+        book = get_book()
+        row = visible[bid]
+        key = by_bid[bid]
         rec = plan.records[key]
+        if location_ok(book, row, rec['kobo'].get('anchor')):
+            fresh = anchor_for_row(book, row)
+            if fresh:
+                rec['kobo']['anchor'] = fresh
+            continue
         m = A.locate(book, rec['kobo'].get('anchor') or {}) if rec['kobo'].get('anchor') else None
         if m is None:
             plan.orphans.append(key)
             plan.log.append(f'ORPHAN on device (location broken, text not found): {(row.get("Text") or "")[:60]!r}')
             continue
         fields = A.to_kobo_location(book, m['chapter'], m['start'], m['end'])
-        fields['ContentID'] = chapter_id_for(m['chapter'].href)
+        fields['ContentID'] = chapter_id_for(book, m['chapter'].href)
         plan.to_repair.append((bid, fields))
         rec['kobo']['raw'].update(fields)
         rec['kobo']['history'].append({'at': now_iso(), 'event': 'repaired', 'method': m['method']})
-        plan.changed.add(key)
         plan.log.append(f'repair location ({m["method"]}): {(row.get("Text") or "")[:50]!r}')
 
     for k in plan.changed:

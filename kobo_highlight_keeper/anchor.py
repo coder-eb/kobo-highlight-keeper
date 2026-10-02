@@ -10,11 +10,12 @@ suffix), which is also what Calibre-Web-NextGen's re-anchoring does.
 """
 
 import re
+from bisect import bisect_right
+from difflib import SequenceMatcher
 
 from .epubtext import kobo_offset_to_pos, run_offset_to_kobo
 
 CONTEXT = 48
-FUZZY_EDGE = 24
 DOGEAR_SPAN = 80
 
 _QUOTES = str.maketrans({
@@ -24,30 +25,89 @@ _QUOTES = str.maketrans({
     '‐': '-', '‑': '-', '‒': '-', '–': '-', '—': '-', '―': '-',
     '­': '',  # soft hyphen (Kobo hyphenation / kepubify)
 })
-_WS = re.compile(r'\s+')
+
+
+_SOFT = '\x00'  # soft hyphens become this (same length), then are dropped
+_SPACES = {c: ' ' for c in map(chr, range(0x3000)) if c.isspace()}
+_FOLD = str.maketrans({**{k: v for k, v in _QUOTES.items() if v != ''}, **_SPACES, 0xAD: _SOFT})
+# Only places where offsets shift: leading blanks, runs of 2+ spaces, soft hyphens.
+_SHIFTS = re.compile(r'^[ \x00]+|[ \x00]*\x00[ \x00]*| {2,}')
+
+
+class NormMap:
+    """norm index -> raw index, stored as breakpoints instead of one int per char."""
+
+    __slots__ = ('starts', 'deltas', 'n', 'raw_len')
+
+    def __init__(self, starts, deltas, n, raw_len):
+        self.starts, self.deltas, self.n, self.raw_len = starts, deltas, n, raw_len
+
+    def __getitem__(self, i):
+        if i >= self.n:
+            return self.raw_len
+        return i + self.deltas[bisect_right(self.starts, i) - 1]
+
+    def __len__(self):
+        return self.n + 1
+
+
+class ListMap(list):
+    pass
 
 
 def normalize_with_map(text):
-    """Normalized text + map from each normalized char to its raw index."""
-    out, idx = [], []
+    """Normalized text + map from each normalized char to its raw index.
+
+    Quotes/dashes unified, soft hyphens dropped, whitespace runs collapsed to
+    one space, lowercased. Built from large slices with C-level str methods;
+    the map only records where offsets shift.
+    """
+    t = text.translate(_FOLD)
+    lowered = t.lower()
+    if len(lowered) != len(t):  # rare: a char that lowercases to two chars
+        return _normalize_charwise(t)
+    pieces, starts, deltas = [], [0], [0]
+    n = last = 0
+    for m in _SHIFTS.finditer(lowered):
+        a, b = m.span()
+        pieces.append(lowered[last:a])
+        n += a - last
+        seg = m.group()
+        if ' ' in seg and a > 0:  # keep one space, mapped to the first blank
+            starts.append(n)
+            deltas.append(a + seg.index(' ') - n)
+            pieces.append(' ')
+            n += 1
+        starts.append(n)
+        deltas.append(b - n)
+        last = b
+    pieces.append(lowered[last:])
+    n += len(lowered) - last
+    norm = ''.join(pieces)
+    if norm.endswith(' '):
+        norm = norm[:-1]
+        n -= 1
+    return norm, NormMap(starts, deltas, n, len(text))
+
+
+def _normalize_charwise(t):
+    out, idx = [], ListMap()
     prev_space = True
-    for i, ch in enumerate(text):
-        ch = ch.translate(_QUOTES)
-        if not ch:
+    for i, ch in enumerate(t):
+        if ch == _SOFT:
             continue
         if ch.isspace():
             if prev_space:
                 continue
-            ch = ' '
-            prev_space = True
+            ch, prev_space = ' ', True
         else:
             prev_space = False
-        out.append(ch.lower())
-        idx.append(i)
-    # drop a trailing space
+        for c in ch.lower():
+            out.append(c)
+            idx.append(i)
     if out and out[-1] == ' ':
         out.pop(), idx.pop()
-    idx.append(len(text))
+    idx.append(len(t))
     return ''.join(out), idx
 
 
@@ -119,9 +179,24 @@ def resolve_row(book, row):
 # --- anchors ------------------------------------------------------------------
 
 def make_anchor(chapter, start, end, highlighted_text=None, dogear=False):
-    norm, idx = chapter_norm(chapter)
-    ns = _raw_to_norm(idx, start)
-    ne = _raw_to_norm(idx, end)
+    """Anchor for raw chapter positions [start, end).
+
+    Only a window around the passage is normalized (not the whole chapter),
+    so saving a highlight is cheap. 'start' and 'chapter_len' are raw offsets.
+    """
+    text = chapter.text
+    span_end = start + 4 * DOGEAR_SPAN if dogear else end
+    pad = 8 * CONTEXT
+    while True:
+        ws, we = max(0, start - pad), min(len(text), span_end + pad)
+        norm, idx = normalize_with_map(text[ws:we])
+        ns = _raw_to_norm(idx, start - ws)
+        ne = _raw_to_norm(idx, min(span_end, we) - ws)
+        enough_before = ns >= CONTEXT or ws == 0
+        enough_after = len(norm) - ne >= CONTEXT or we == len(text)
+        if (enough_before and enough_after) or pad > len(text):
+            break
+        pad *= 4  # mostly whitespace around it: widen the window
     if dogear:
         ne = min(len(norm), ns + DOGEAR_SPAN)
     while ns < ne and norm[ns] == ' ':
@@ -138,8 +213,8 @@ def make_anchor(chapter, start, end, highlighted_text=None, dogear=False):
         'exact': exact,
         'prefix': norm[max(0, ns - CONTEXT):ns],
         'suffix': norm[ne:ne + CONTEXT],
-        'start': ns,
-        'chapter_len': len(norm),
+        'start': start,
+        'chapter_len': len(text),
         'dogear': dogear,
     }
 
@@ -217,32 +292,88 @@ def locate(book, anchor):
                 # tie-break on distance from the original relative position
                 if anchor.get('chapter_len'):
                     rel_then = anchor['start'] / max(1, anchor['chapter_len'])
-                    score -= abs(i / max(1, len(norm)) - rel_then)
+                    score -= abs(idx[i] / max(1, len(ch.text)) - rel_then)
             cand = (score, ch, idx[i], idx[e], 'exact' if ch.href == home else 'moved')
             if best is None or cand[0] > best[0]:
                 best = cand
             i = norm.find(exact, i + 1)
+        if best and ch.href == home:
+            break  # found in its own chapter: don't read the rest of the book
     if best:
         _, ch, s, e, method = best
         if anchor.get('dogear'):
             e = s
         return {'chapter': ch, 'start': s, 'end': e, 'method': method}
 
-    # Fuzzy: the passage was edited. Accept when both its head and its tail
-    # are still present, in order, at a plausible distance.
-    if len(exact) < 2 * FUZZY_EDGE:
-        return None
-    head, tail = exact[:FUZZY_EDGE], exact[-FUZZY_EDGE:]
+    # Fuzzy: the passage was edited. Seed-and-verify approximate matching.
+    best = None
     for ch in chapters:
         norm, idx = chapter_norm(ch)
-        i = norm.find(head)
-        while i >= 0:
-            j = norm.find(tail, i + len(head))
-            if j >= 0 and (j + len(tail) - i) <= len(exact) * 1.5 + 40:
-                return {'chapter': ch, 'start': idx[i], 'end': idx[j + len(tail)],
-                        'method': 'fuzzy'}
-            i = norm.find(head, i + 1)
+        hit = fuzzy_find(norm, exact)
+        if hit:
+            s, e, ratio = hit
+            score = ratio * 100 + _context_score(norm, s, e, anchor) + (5 if ch.href == home else 0)
+            if best is None or score > best[0]:
+                best = (score, ch, idx[s], idx[e])
+            if ch.href == home:
+                break
+    if best:
+        _, ch, s, e = best
+        if anchor.get('dogear'):
+            e = s
+        return {'chapter': ch, 'start': s, 'end': e, 'method': 'fuzzy'}
     return None
+
+
+FUZZY_MIN_LEN = 32
+FUZZY_MIN_RATIO = 0.75
+
+
+def fuzzy_find(norm, exact):
+    """Best approximate occurrence of ``exact`` in ``norm``: (start, end, ratio) or None.
+
+    1. Seeds: ~9 short pieces of the passage are looked up with str.find; each
+       hit votes for where the passage would start.
+    2. Verify: the top candidate spots are aligned with difflib, giving exact
+       boundaries and a similarity ratio.
+    Tolerates edits anywhere in the passage (start, middle or end).
+    """
+    n = len(exact)
+    if n < FUZZY_MIN_LEN:
+        return None  # too short to place safely without an exact match
+    # Short passages share too many common phrases with other text: be stricter.
+    min_ratio = FUZZY_MIN_RATIO if n >= 80 else 0.85
+    k = 8 if n < 48 else 12
+    step = max(1, (n - k) // 8)
+    votes = {}
+    for off in range(0, n - k + 1, step):
+        seed = exact[off:off + k]
+        i, hits = norm.find(seed), 0
+        while i >= 0 and hits < 20:
+            bucket = (i - off) // 16
+            votes[bucket] = votes.get(bucket, 0) + 1
+            i, hits = norm.find(seed, i + 1), hits + 1
+    candidates = sorted((v, b) for b, v in votes.items() if v >= 2)[-3:]
+    best = None
+    for _, bucket in candidates:
+        c = bucket * 16
+        a, b = max(0, c - n // 2 - 16), min(len(norm), c + n + n // 2 + 16)
+        blocks = [m for m in SequenceMatcher(None, exact, norm[a:b], autojunk=False).get_matching_blocks()
+                  if m.size]
+        if not blocks:
+            continue
+        # Keep blocks on the same alignment as the largest one; stray short
+        # matches of common letters elsewhere in the window are dropped.
+        main = max(blocks, key=lambda m: m.size)
+        diag, slack = main.b - main.a, max(12, n // 4)
+        blocks = [m for m in blocks if m.size >= 3 and abs((m.b - m.a) - diag) <= slack]
+        s, e = a + blocks[0].b, a + blocks[-1].b + blocks[-1].size
+        if not (0.5 * n <= e - s <= 1.5 * n):
+            continue
+        ratio = SequenceMatcher(None, exact, norm[s:e], autojunk=False).ratio()
+        if ratio >= min_ratio and (best is None or ratio > best[2]):
+            best = (s, e, ratio)
+    return best
 
 
 # --- back to Kobo coordinates ---------------------------------------------
