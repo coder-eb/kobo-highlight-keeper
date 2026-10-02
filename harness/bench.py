@@ -64,7 +64,7 @@ def highlight(con, vid, b, rng):
 def timed(label, fn):
     t = time.perf_counter()
     out = fn()
-    print(f'  {label:<34} {time.perf_counter() - t:7.2f} s')
+    print(f'  {label:<38} {time.perf_counter() - t:7.2f} s')
     return out
 
 
@@ -101,11 +101,11 @@ def main():
 
     store = {str(p): [] for p in paths}
 
-    def run():
+    def run(write=True):
         c = kobodb.connect(db)
         tasks = [{'key': str(p), 'title': p.name, 'path': p, 'records': store[str(p)], 'library_path': p}
                  for p in paths]
-        res = sync_books(c, mount, tasks)
+        res = sync_books(c, mount, tasks, write=write)
         c.commit()
         c.close()
         writes = 0
@@ -116,17 +116,21 @@ def main():
                     writes += 1
         return writes
 
-    w = timed('first sync (all new)', run)
-    print(f'  {"":<34} calibre writes for {w} books')
-    w = timed('no-change sync (every connect)', run)
-    print(f'  {"":<34} calibre writes for {w} books')
+    w = timed('first copy from Kobo (all new)', lambda: run(False))
+    print(f'  {"":<38} calibre writes for {w} books')
+    w = timed('copy-only connect, nothing changed', lambda: run(False))
+    print(f'  {"":<38} calibre writes for {w} books')
+    w = timed('full sync, nothing changed', run)
+    print(f'  {"":<38} calibre writes for {w} books')
     con = sqlite3.connect(db)
     for p in annotated[:5]:
         con.execute('DELETE FROM Bookmark WHERE VolumeID = ?', (kobodb.volume_id_for(mount, p),))
     con.commit()
     con.close()
-    w = timed('restore 5 wiped books', run)
-    print(f'  {"":<34} calibre writes for {w} books')
+    w = timed('copy-only connect after 5 wiped books', lambda: run(False))
+    print(f'  {"":<38} calibre writes for {w} books (changes held back)')
+    w = timed('full sync: restore the 5 wiped books', run)
+    print(f'  {"":<38} calibre writes for {w} books')
     shutil.rmtree(tmp)
 
 

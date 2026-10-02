@@ -1,10 +1,17 @@
 import os
 
 from calibre.utils.config import JSONConfig, config_dir
-from qt.core import QCheckBox, QFormLayout, QLabel, QLineEdit, QSpinBox, QWidget
+from qt.core import QCheckBox, QComboBox, QFormLayout, QLabel, QLineEdit, QSpinBox, QWidget
 
 prefs = JSONConfig('plugins/Kobo Highlight Keeper')
-prefs.defaults['auto_sync'] = True
+# What happens when a Kobo is connected: 'copy' (copy highlights from the
+# Kobo, never write to it), 'sync' (both ways) or 'off'.
+prefs.defaults['on_connect'] = 'copy'
+ON_CONNECT = (
+    ('copy', 'Copy new highlights from the Kobo (don’t change the Kobo)'),
+    ('sync', 'Sync both ways (also put back highlights the Kobo lost)'),
+    ('off', 'Do nothing'),
+)
 prefs.defaults['backup_dir'] = ''
 prefs.defaults['keep_backups'] = 20
 prefs.defaults['show_in_viewer'] = True
@@ -70,17 +77,19 @@ class ConfigWidget(QWidget):
     def __init__(self):
         super().__init__()
         lay = QFormLayout(self)
-        self.auto_sync = QCheckBox('Sync automatically whenever a Kobo is connected')
-        self.auto_sync.setChecked(prefs['auto_sync'])
-        lay.addRow(self.auto_sync)
+        self.on_connect = QComboBox(self)
+        for value, text in ON_CONNECT:
+            self.on_connect.addItem(text, value)
+        self.on_connect.setCurrentIndex(max(0, self.on_connect.findData(prefs['on_connect'])))
+        lay.addRow('When a Kobo is connected:', self.on_connect)
         self.show_in_viewer = QCheckBox("Show Kobo highlights in calibre's viewer")
         self.show_in_viewer.setChecked(prefs['show_in_viewer'])
         self.show_in_viewer.setToolTip('Notes edited or highlights deleted in the viewer are sent to the Kobo too.')
         lay.addRow(self.show_in_viewer)
         lay.addRow(QLabel(
-            'Sync pulls new and changed annotations from the Kobo into calibre, and restores\n'
-            'annotations the Kobo has lost (deleted/re-sent/re-converted books).\n'
-            'Highlights you delete on the Kobo are kept in calibre but not pushed back.'))
+            'Copying never writes to the Kobo: highlights it lost, and notes or deletions made in\n'
+            'calibre, wait until you choose Kobo highlights → Sync with Kobo now.\n'
+            'Highlights you delete on the Kobo are kept in calibre but not put back.'))
         self.backup = QLineEdit(prefs['backup_dir'])
         self.backup.setPlaceholderText(os.path.join(DATA_DIR, 'kobo-db-backups'))
         lay.addRow('Kobo database backups:', self.backup)
@@ -90,7 +99,7 @@ class ConfigWidget(QWidget):
         lay.addRow('Backups to keep:', self.keep)
 
     def save_settings(self):
-        prefs['auto_sync'] = self.auto_sync.isChecked()
+        prefs['on_connect'] = self.on_connect.currentData()
         prefs['show_in_viewer'] = self.show_in_viewer.isChecked()
         prefs['backup_dir'] = self.backup.text().strip()
         prefs['keep_backups'] = self.keep.value()

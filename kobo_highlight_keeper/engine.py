@@ -9,10 +9,10 @@ from pathlib import Path
 
 from . import kobodb
 from .epubtext import Book
-from .sync import ACTIVE, DELETED, add_calibre_positions, apply_to_device, reconcile
+from .sync import add_calibre_positions, apply_to_device, reconcile
 
 
-def sync_books(conn, mount, tasks, backup=None):
+def sync_books(conn, mount, tasks, backup=None, write=True):
     """tasks: [{'key': <calibre id>, 'title': str, 'path': <file on device>, 'records': [...],
               optional 'library_path': <calibre's copy, for viewer positions>,
               optional 'viewer_spine_offset': callable -> int}]
@@ -22,6 +22,9 @@ def sync_books(conn, mount, tasks, backup=None):
 
     Cost: two queries for the whole device; a book file is opened only when
     one of its annotations is new, edited, missing or its file changed.
+
+    write=False copies from the Kobo only: everything is worked out, but no
+    change is written to the Kobo (they wait for the next full sync).
     """
     indexed_books = kobodb.sideloaded_books(conn)
     rows_by_volume = kobodb.bookmarks_by_volume(conn)
@@ -65,7 +68,12 @@ def sync_books(conn, mount, tasks, backup=None):
     matched = {kobodb.volume_id_for(mount, t['path']) for t in tasks}
     unmatched = unmatched_volumes(conn, rows_by_volume, matched)
 
-    if any(r.get('plan') and r['plan'].device_writes for r in results):
+    if not write:
+        for r in results:
+            if r.get('plan'):
+                r['plan'].hold_device_writes('copy-only: changes for the Kobo were not written; '
+                                             'choose Sync with Kobo now to write them')
+    elif any(r.get('plan') and r['plan'].device_writes for r in results):
         problem = integrity_problem(conn)
         if problem:
             # Never write into a damaged database; calibre still gets the pull.
@@ -136,7 +144,7 @@ def unmatched_volumes(conn, rows_by_volume, matched):
 
 def summarize(results):
     tot = dict(books=0, new=0, restored=0, repaired=0, deleted=0, orphans=0, pending=0, errors=0,
-               notes_sent=0, removed=0)
+               notes_sent=0, removed=0, waiting=0)
     lines = []
     for r in results:
         if r.get('error'):
@@ -152,17 +160,19 @@ def summarize(results):
         tot['new'] += sum(1 for line in p.log if line.startswith('new from device'))
         tot['deleted'] += sum(1 for line in p.log if line.startswith('deleted on device'))
         tot['notes_sent'] += len(p.to_update)
+        tot['waiting'] += p.held
         tot['removed'] += len(p.to_delete)
         tot['errors'] += sum(1 for line in p.log if line.startswith('ERROR'))
-        active = sum(1 for rec in p.records.values() if rec['kobo']['state'] == ACTIVE)
-        deleted = sum(1 for rec in p.records.values() if rec['kobo']['state'] == DELETED)
-        lines.append(f'{r["title"]}: {active} active, {deleted} deleted on device'
-                     + (f', {len(p.pending)} waiting for Kobo to index the book' if p.pending else ''))
-        lines.extend('    ' + line for line in p.log)
-    head = (f'{tot["books"]} books: {tot["new"]} new from Kobo, {tot["restored"]} restored to Kobo, '
-            f'{tot["repaired"]} repaired, {tot["deleted"]} deleted on device, '
-            f'{tot["notes_sent"]} notes sent to Kobo, {tot["removed"]} removed from Kobo, '
-            f'{tot["orphans"]} orphaned, {tot["pending"]} pending, {tot["errors"]} errors')
+        if p.log:  # only books where something happened
+            lines.append(r['title'])
+            lines.extend('    ' + line for line in p.log)
+    parts = [f'{n} {label}' for n, label in (
+        (tot['new'], 'new from the Kobo'), (tot['restored'], 'put back on the Kobo'),
+        (tot['repaired'], 'repaired'), (tot['deleted'], 'deleted on the Kobo'),
+        (tot['notes_sent'], 'notes sent to the Kobo'), (tot['removed'], 'removed from the Kobo'),
+        (tot['orphans'], 'could not be placed'), (tot['pending'], 'waiting for the Kobo to import the book'),
+        (tot['waiting'], 'change(s) waiting to be written to the Kobo'), (tot['errors'], 'errors')) if n]
+    head = ', '.join(parts) if parts else 'nothing new'
     unmatched = getattr(results, 'unmatched', [])
     if unmatched:
         lines.append(f'\n{len(unmatched)} book(s) on the Kobo have annotations but are not in the library '

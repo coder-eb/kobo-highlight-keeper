@@ -8,7 +8,7 @@ calibre is the main copy. The Kobo holds a working copy that can be rebuilt.
 
 ## What it does
 
-When a Kobo is connected (or when you pick **Kobo highlights → Sync with Kobo now**),
+When you pick **Kobo highlights → Sync with Kobo now** (or on connect, if set to sync both ways),
 the plugin does the following for every book on the device that's in your
 library:
 
@@ -112,7 +112,8 @@ highlights each):
 
 | Case | Time |
 |---|---|
-| Connect, nothing changed (the everyday case) | 0.05 s, no writes |
+| Connect, nothing changed (the everyday case; copy-only or full) | 0.07 s, no writes |
+| Copy-only connect after 5 books were wiped | 0.26 s, Kobo untouched |
 | Restore 5 wiped books | 0.28 s |
 | First sync of 750 highlights (one-off, incl. calibre positions) | 1.5 s |
 
@@ -202,12 +203,27 @@ Still unconfirmed on a real device (marked ASSUMED in the code):
   place, e.g. after editing a book and re-sending it without deleting it
   first. `fake_nickel.py import --wipe-on-change` simulates the harsher case.
 
+## When a Kobo is connected
+
+Set in **Settings…**:
+
+- **Copy new highlights from the Kobo** (default). Nothing is written to the
+  Kobo automatically. If changes are waiting (highlights the Kobo lost, notes
+  or deletions made in calibre), the status bar says how many, and **Sync
+  with Kobo now** writes them.
+- **Sync both ways.** Writes happen automatically on connect.
+- **Do nothing.**
+
+The status bar and sync history show only what happened in that sync. Use
+the views below to look at existing highlights.
+
 ## Menu
 
 | Item | What it does |
 |---|---|
-| **Sync with Kobo now** | Same as the automatic sync on connect. Greyed out without a Kobo. |
+| **Sync with Kobo now** | Both ways: copies from the Kobo, and writes to it (restores, repairs, notes and deletions made in calibre). Greyed out without a Kobo. |
 | **Sync selected books with Kobo** | The same, limited to the books selected in the library. |
+| **Copy highlights from Kobo only** | Copies new and edited highlights into calibre and never writes to the Kobo. Changes for the Kobo wait for the next **Sync with Kobo now**. |
 | **View Kobo highlights…** | The plugin's own reading view; also opens when you click the toolbar button. Books on the left (most recently highlighted first, with covers). The chosen book's highlights on the right, grouped by chapter, with notes and dates. Each card has **Open in viewer** and **Copy**. Searches highlights and notes across all books; highlights deleted on the Kobo can be shown. |
 | **Open calibre's annotations browser** | calibre's own browser, set to show only Kobo highlights. calibre remembers that filter; change *User* back to see others. |
 | **Export highlights of selected books…** | Markdown files, one per book, grouped by chapter. |

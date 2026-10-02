@@ -183,6 +183,9 @@ class HarnessAction(InterfaceAction):
         return [a['annotation'] for a in db.all_annotations(restrict_to_user=('local', 'viewer'),
                                                              restrict_to_book_ids={book_id})]
 
+    def status_text(self):
+        return self.gui.status_bar.currentMessage() or ''
+
     def kobo_note(self, text_start):
         con = sqlite3.connect(os.path.join(KOBO, '.kobo', 'KoboReader.sqlite'))
         row = con.execute('SELECT Annotation FROM Bookmark WHERE Text LIKE ?', (text_start + '%',)).fetchone()
@@ -235,7 +238,8 @@ def scenario(h):
     m.popup(h.gui.mapToGlobal(QPoint(300, 120)))
     yield wait(h, lambda: m.isVisible(), 5, 'menu shown')
     h.shot('02-plugin-menu', m)
-    h.check(h.khk.sync_all_action.isEnabled(), 'with a Kobo, sync is available')
+    h.check(h.khk.sync_all_action.isEnabled() and h.khk.copy_action.isEnabled(),
+            'with a Kobo, sync and copy-only are available')
     m.hide()
 
     # 2. send books the normal way (driver kepubifies; Ladies forced to EPUB)
@@ -336,8 +340,14 @@ def scenario(h):
     h.nickel('import')
     h.connect_kobo()
     yield wait(h, h.connected, 60, 'reconnected')
-    yield settle(h, 'auto restore')
-    h.check(h.bookmark_rows('Reformatory') == 3, 'Reformatory highlights restored to the Kobo')
+    yield settle(h, 'automatic copy on connect')
+    h.check(h.bookmark_rows('Reformatory') == 0, 'automatic copy-only sync did not write to the Kobo')
+    h.check('waiting to be written' in h.status_text(), 'status bar says changes are waiting: '
+            + h.status_text()[:120])
+    h.shot('06z-status-changes-waiting')
+    QTimer.singleShot(0, lambda: h.khk.sync(None, False))  # Kobo highlights → Sync with Kobo now
+    yield settle(h, 'sync with Kobo now')
+    h.check(h.bookmark_rows('Reformatory') == 3, 'Sync with Kobo now restored the highlights')
     out = h.nickel('verify')
     h.check(out.returncode == 0, 'independent check: every highlight on the Kobo points at its text')
     backups = os.listdir(os.path.join(SANDBOX, 'config', 'plugins', PLUGIN, 'kobo-db-backups'))

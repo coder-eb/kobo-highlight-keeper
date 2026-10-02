@@ -82,6 +82,10 @@ class KoboHighlightKeeperAction(InterfaceAction):
             'khk-sync-sel', 'Sync selected books with Kobo',
             'Same as Sync with Kobo now, for the books selected in the library only.',
             self.sync_selected)
+        self.copy_action = item(
+            'khk-copy', 'Copy highlights from Kobo only',
+            'Copy new and edited highlights from the Kobo into calibre without changing anything on the Kobo.',
+            partial(self.sync, None, True, False), icon='edit-copy.png')
         m.addSeparator()
         # looking at highlights
         item('khk-view', 'View Kobo highlights…',
@@ -140,6 +144,9 @@ class KoboHighlightKeeperAction(InterfaceAction):
         self.sync_all_action.setEnabled(connected)
         self.sync_all_action.setText('Sync with Kobo now' if connected else 'Sync with Kobo now (connect a Kobo)')
         self.sync_sel_action.setEnabled(connected and selected)
+        self.copy_action.setEnabled(connected)
+        self.copy_action.setText('Copy highlights from Kobo only' if connected else
+                                 'Copy highlights from Kobo only (connect a Kobo)')
         self.sync_sel_action.setText('Sync selected books with Kobo' if connected and selected else
                                      'Sync selected books with Kobo (' +
                                      ('connect a Kobo' if not connected else 'select books') + ')')
@@ -163,11 +170,12 @@ class KoboHighlightKeeperAction(InterfaceAction):
     def _metadata_available(self):
         # calibre emits this after every booklist refresh (each send/delete);
         # auto-sync only on the first one per connection.
-        if self._synced_this_connection or not cfg.prefs['auto_sync'] or self.kobo() is None:
+        mode = cfg.prefs['on_connect']
+        if self._synced_this_connection or mode == 'off' or self.kobo() is None:
             return
         self._synced_this_connection = True
         # Let calibre finish matching device books to the library first.
-        QTimer.singleShot(250, partial(self.sync, None, False))
+        QTimer.singleShot(250, partial(self.sync, None, False, mode == 'sync'))
 
     def _tasks(self, only_ids):
         db = self.gui.current_db.new_api
@@ -203,7 +211,7 @@ class KoboHighlightKeeperAction(InterfaceAction):
             return error_dialog(self.gui, 'No books selected', 'Select books in the library first.', show=True)
         self.sync(ids, True)
 
-    def sync(self, only_ids=None, interactive=True):
+    def sync(self, only_ids=None, interactive=True, write=True):
         dev = self.kobo()
         if dev is None:
             if interactive:
@@ -216,8 +224,8 @@ class KoboHighlightKeeperAction(InterfaceAction):
         self.gui.device_manager.create_job(
             run_sync, Dispatcher(partial(self._sync_done, interactive)),
             description='Sync Kobo annotations',
-            args=[dev, tasks, cfg.backup_dir(), cfg.prefs['keep_backups']])
-        self.gui.status_bar.show_message('Kobo annotations: syncing…')
+            args=[dev, tasks, cfg.backup_dir(), cfg.prefs['keep_backups'], write])
+        self.gui.status_bar.show_message('Kobo highlights: ' + ('syncing…' if write else 'copying from the Kobo…'))
 
     def _sync_done(self, interactive, job):
         self._running = False
@@ -242,9 +250,11 @@ class KoboHighlightKeeperAction(InterfaceAction):
         eventful = any(v for k, v in tot.items() if k != 'books') or bool(unmatched)
         if interactive or eventful:  # auto-sync runs after every device refresh
             cfg.save_report(f'{head}\n{backups}\n\n{detail}\n')
-        msg = 'Kobo annotations: ' + head
-        if tot['orphans'] or tot['errors']:
-            msg += '  (see Kobo annotations → Show last sync report)'
+        msg = 'Kobo highlights: ' + head
+        if tot['waiting']:
+            msg += '  (Kobo highlights → Sync with Kobo now writes them)'
+        elif tot['orphans'] or tot['errors']:
+            msg += '  (see Kobo highlights → Sync history)'
         self.gui.status_bar.show_message(msg, 15000)
         if interactive:
             self.show_report()

@@ -52,6 +52,7 @@ class Plan:
     log: list = field(default_factory=list)
     raw_before_update: dict = field(default_factory=dict)  # BookmarkID -> raw, to undo note pushes
     spots: dict = field(default_factory=dict)  # key -> (chapter, start, end) in spots_book, if known
+    held: int = 0  # Kobo changes not written (copy-only sync, or a damaged database)
     spots_book: object = None
 
     @property
@@ -59,9 +60,17 @@ class Plan:
         return bool(self.to_insert or self.to_repair or self.to_update or self.to_delete)
 
     def skip_device_writes(self, reason):
-        """Drop planned Kobo writes; records keep their pre-sync device state."""
+        """Drop planned Kobo writes because something is wrong (reported as an error)."""
+        self.hold_device_writes(reason, error=True)
+
+    def hold_device_writes(self, reason, error=False):
+        """Don't write to the Kobo; records keep their pre-sync device state so
+        the next full sync writes the same changes."""
         if not self.device_writes:
             return
+        self.held = len(self.to_insert) + len(self.to_repair) + len(self.to_update) + len(self.to_delete)
+        waiting = ('restore', 'repair location', 'note edited in calibre', 'deleted in calibre')
+        self.log = ['waiting: ' + line if line.startswith(waiting) else line for line in self.log]
         for row in self.to_insert:
             rec = self.records.get(row_key(row))
             if rec:
@@ -71,7 +80,7 @@ class Plan:
             if before is not None:  # the Kobo still has the old note
                 rec['kobo']['raw'] = before
         self.to_insert, self.to_repair, self.to_update, self.to_delete = [], [], [], []
-        self.log.append('ERROR ' + reason)
+        self.log.append(('ERROR ' if error else 'HELD ') + reason)
 
     def all_records(self):
         """Everything to store back in calibre, including deletion markers."""
@@ -169,6 +178,15 @@ def anchor_for_row(book, row):
             return A.make_anchor(ch, s, e, text)
     # Location doesn't point at the highlighted text (file changed): use text.
     return A.anchor_from_text(book, text) if text else None
+
+
+def with_calibre_note(rec, row):
+    """A row to restore carries calibre's current note (it may have been edited
+    in calibre while the highlight was missing from the Kobo)."""
+    if rec['type'] == 'highlight' and (rec.get('notes') or '') != (row.get('Annotation') or ''):
+        row.update(Annotation=rec.get('notes') or None, DateModified=kobo_now(),
+                   Type='note' if rec.get('notes') else 'highlight')
+    return row
 
 
 def remember_spot(plan, key, book, row, anchor):
@@ -316,7 +334,7 @@ def reconcile(get_book, book_format, volume_id, file_sig, device_rows, records,
             plan.pending.append(k)
             continue
         book = get_book()
-        row = dict(kobo['raw'])
+        row = with_calibre_note(rec, dict(kobo['raw']))
         hit = A.resolve_row(book, row)
         if hit and location_ok(book, row, kobo.get('anchor')):
             # 1st choice: the original Kobo position still points at this
@@ -341,7 +359,7 @@ def reconcile(get_book, book_format, volume_id, file_sig, device_rows, records,
                 plan.changed.add(k)
             plan.log.append(f'ORPHAN (text not found, not restored): {rec.get("highlighted_text", "")[:60]!r}')
             continue
-        row = dict(kobo['raw'])
+        row = with_calibre_note(rec, dict(kobo['raw']))
         row.update(A.to_kobo_location(book, m['chapter'], m['start'], m['end']))
         row.update(VolumeID=volume_id, ContentID=chapter_id_for(book, m['chapter'].href), Hidden='false')
         if m['method'] == 'fuzzy':

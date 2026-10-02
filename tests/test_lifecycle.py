@@ -78,11 +78,12 @@ class Device:
         con.close()
         (self.mount / rel).unlink()
 
-    def sync(self, path, records):
+    def sync(self, path, records, write=True):
         con = kobodb.connect(self.db)
         backups = []
         res = sync_books(con, self.mount, [{'key': 1, 'title': path.name, 'path': path, 'records': records}],
-                         backup=lambda: backups.append(kobodb.backup(self.db, self.mount.parent / 'backups')))
+                         backup=lambda: backups.append(kobodb.backup(self.db, self.mount.parent / 'backups')),
+                         write=write)
         con.commit()
         con.close()
         print('\n' + summarize(res)[2])
@@ -321,6 +322,58 @@ class TestCalibreIsMaster(unittest.TestCase):
         plan, records, _ = self.dev.sync(self.path, records)
         self.assertEqual(self.dev.bookmark_count(self.rel), 2)
         self.dev.nickel('verify')
+
+
+@unittest.skipUnless(BOOKS.exists(), 'run harness/setup_sandbox.py first')
+class TestCopyOnly(unittest.TestCase):
+    """Copy-only syncs never change the Kobo; what they hold back, a full sync writes."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='khk-')
+        self.dev = Device(Path(self.tmp) / 'KOBOeReader')
+        self.src = glob.glob(str(BOOKS / '852' / '*.kepub'))[0]
+        self.rel = 'Natsume Soseki/Botchan - Natsume Soseki.kepub.epub'
+        self.path = self.dev.send(self.src, self.rel)
+        self.dev.nickel('import')
+        for text, note in HIGHLIGHTS['botchan']:
+            self.dev.nickel('highlight', 'Botchan', '--text', text, *(['--note', note] if note else []))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def db_bytes(self):
+        return self.dev.db.read_bytes()
+
+    def test_copy_only_never_writes_and_full_sync_catches_up(self):
+        plan, records, backups = self.dev.sync(self.path, [], write=False)
+        self.assertEqual(len(records), 2, 'copying still pulls highlights into calibre')
+        # wipe (delete + re-send + import) and edit a note in calibre
+        self.dev.calibre_delete(self.rel)
+        self.path = self.dev.send(self.src, self.rel)
+        self.dev.nickel('import')
+        noted = next(r for r in records if r.get('notes'))
+        records = [dict(r, notes='edited in calibre', timestamp=calibre_now()) if r is noted else r
+                   for r in records]
+        before = self.db_bytes()
+        plan, records, backups = self.dev.sync(self.path, records, write=False)
+        self.assertEqual(self.db_bytes(), before, 'copy-only left the Kobo database byte-for-byte unchanged')
+        self.assertFalse(backups, 'nothing to back up when nothing is written')
+        self.assertEqual(plan.held, 2)
+        self.assertTrue(any(line.startswith('HELD') for line in plan.log))
+        self.assertIn('2 change(s) waiting', summarize([{'key': 1, 'title': 'b', 'plan': plan}])[0])
+        self.assertTrue(all(not r['kobo']['on_device'] for r in records if 'kobo' in r))
+        # copying again holds the same changes (nothing lost, nothing duplicated)
+        plan, records, _ = self.dev.sync(self.path, records, write=False)
+        self.assertEqual(plan.held, 2)
+        # the full sync writes what was held
+        plan, records, backups = self.dev.sync(self.path, records)
+        self.assertEqual(len(plan.to_insert), 2)
+        self.assertEqual(len(backups), 1)
+        self.dev.nickel('verify')
+        con = kobodb.connect(self.dev.db)
+        notes = [r['Annotation'] for r in con.execute('SELECT Annotation FROM Bookmark') if r['Annotation']]
+        con.close()
+        self.assertEqual(notes, ['edited in calibre'], 'the calibre note edit was kept and written')
 
 
 if __name__ == '__main__':
