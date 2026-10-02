@@ -103,7 +103,8 @@ def main():
 
     def run():
         c = kobodb.connect(db)
-        tasks = [{'key': str(p), 'title': p.name, 'path': p, 'records': store[str(p)]} for p in paths]
+        tasks = [{'key': str(p), 'title': p.name, 'path': p, 'records': store[str(p)], 'library_path': p}
+                 for p in paths]
         res = sync_books(c, mount, tasks)
         c.commit()
         c.close()

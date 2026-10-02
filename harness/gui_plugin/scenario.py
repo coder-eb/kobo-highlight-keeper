@@ -164,6 +164,15 @@ class HarnessAction(InterfaceAction):
         con.close()
         return n
 
+    def viewer_spine(self, path):
+        """Spine of the book as calibre's viewer prepares it (render_for_viewer)."""
+        import tempfile
+        from calibre.srv.render_book import render_for_viewer
+        out = tempfile.mkdtemp(dir=os.path.join(SANDBOX, 'tmp'))
+        render_for_viewer(path, out, 'scenario')
+        with open(os.path.join(out, 'calibre-book-manifest.json')) as f:
+            return json.load(f)['spine']
+
     def kobo_note(self, text_start):
         con = sqlite3.connect(os.path.join(KOBO, '.kobo', 'KoboReader.sqlite'))
         row = con.execute('SELECT Annotation FROM Bookmark WHERE Text LIKE ?', (text_start + '%',)).fetchone()
@@ -247,6 +256,17 @@ def scenario(h):
     h.check(len(h.calibre_records(BOT)) == 3, 'Botchan: 2 highlights + 1 dogear pulled into calibre')
     h.check(len(h.calibre_records(LAD)) == 2, 'No. 1 Ladies (epub): 2 highlights pulled into calibre')
     h.shot('04-status-after-auto-sync')
+    # calibre viewer positions: present, and the spine index points at the
+    # same chapter in the book as calibre's viewer actually prepares it
+    db = h.gui.current_db.new_api
+    for book_id in (REF, BOT, LAD):
+        fmt = 'KEPUB' if 'KEPUB' in db.formats(book_id) else 'EPUB'
+        viewer_spine = h.viewer_spine(db.format_abspath(book_id, fmt))
+        highlights = [r for r in h.calibre_records(book_id) if r['type'] == 'highlight']
+        ok = all(r.get('start_cfi') and r['kobo'].get('cfi_exact') and
+                 viewer_spine[r['spine_index']] == r['spine_name'] for r in highlights)
+        h.check(ok and highlights, f'{fmt} book {book_id}: viewer positions point at the right chapters '
+                                   f'(viewer spine has {len(viewer_spine)} items)')
 
     h.gui.iactions['Browse Annotations'].show_browser()
     yield wait(h, lambda: h.window('annotations') is not None, 15, 'annotations browser')

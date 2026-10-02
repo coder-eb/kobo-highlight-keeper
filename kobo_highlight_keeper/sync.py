@@ -51,6 +51,8 @@ class Plan:
     tombstones: list = field(default_factory=list)     # calibre's markers for deleted annotations
     log: list = field(default_factory=list)
     raw_before_update: dict = field(default_factory=dict)  # BookmarkID -> raw, to undo note pushes
+    spots: dict = field(default_factory=dict)  # key -> (chapter, start, end) in spots_book, if known
+    spots_book: object = None
 
     @property
     def device_writes(self):
@@ -169,6 +171,13 @@ def anchor_for_row(book, row):
     return A.anchor_from_text(book, text) if text else None
 
 
+def remember_spot(plan, key, book, row, anchor):
+    """Note where a row is in ``book`` so calibre positions needn't search again."""
+    hit = A.resolve_row(book, row)
+    if hit and location_ok(book, row, anchor):
+        plan.spots[key], plan.spots_book = hit, book
+
+
 def location_ok(book, row, anchor=None):
     """Does the row's location still point at its own text in this file?"""
     hit = A.resolve_row(book, row)
@@ -227,6 +236,7 @@ def reconcile(get_book, book_format, volume_id, file_sig, device_rows, records,
             anchor = anchor_for_row(book, row)
             rec = row_to_record(row, anchor, book_format, volume_id, file_sig)
             set_chapter(rec, book)
+            remember_spot(plan, record_key(rec), book, row, anchor)
             k = record_key(rec)
             # Same passage re-highlighted after a wipe: the new row wins.
             for other in plan.records.values():
@@ -316,6 +326,7 @@ def reconcile(get_book, book_format, volume_id, file_sig, device_rows, records,
             kobo['raw'] = row
             kobo.update(on_device=True, volume_id=volume_id, file_sig=file_sig, format=book_format)
             kobo['history'].append({'at': now_iso(), 'event': 'restored', 'method': 'same-position'})
+            plan.spots[k], plan.spots_book = hit, book
             if 'toc_family_titles' not in rec:
                 set_chapter(rec, book)
             plan.changed.add(k)
@@ -340,6 +351,7 @@ def reconcile(get_book, book_format, volume_id, file_sig, device_rows, records,
         kobo.update(on_device=True, volume_id=volume_id, file_sig=file_sig, format=book_format)
         kobo['history'].append({'at': now_iso(), 'event': 'restored', 'method': m['method']})
         set_chapter(rec, book)
+        plan.spots[k], plan.spots_book = (m['chapter'], m['start'], m['end']), book
         plan.changed.add(k)
         plan.log.append(f'restore ({m["method"]}): {(rec.get("highlighted_text") or "dogear")[:50]!r}')
 
@@ -354,6 +366,7 @@ def reconcile(get_book, book_format, volume_id, file_sig, device_rows, records,
             if fresh:
                 rec['kobo']['anchor'] = fresh
                 set_chapter(rec, book)
+            remember_spot(plan, key, book, row, rec['kobo']['anchor'])
             continue
         m = A.locate(book, rec['kobo'].get('anchor') or {}) if rec['kobo'].get('anchor') else None
         if m is None:
@@ -363,6 +376,7 @@ def reconcile(get_book, book_format, volume_id, file_sig, device_rows, records,
         fields = A.to_kobo_location(book, m['chapter'], m['start'], m['end'])
         fields['ContentID'] = chapter_id_for(book, m['chapter'].href)
         plan.to_repair.append((bid, fields))
+        plan.spots[key], plan.spots_book = (m['chapter'], m['start'], m['end']), book
         rec['kobo']['raw'].update(fields)
         rec['kobo']['history'].append({'at': now_iso(), 'event': 'repaired', 'method': m['method']})
         plan.log.append(f'repair location ({m["method"]}): {(row.get("Text") or "")[:50]!r}')
@@ -370,6 +384,45 @@ def reconcile(get_book, book_format, volume_id, file_sig, device_rows, records,
     for k in plan.changed:
         apply_state_style(plan.records[k])
     return plan
+
+
+def add_calibre_positions(plan, get_library_book, library_sig, viewer_spine_offset=lambda: 0):
+    """Give records calibre-viewer positions in the library's copy of the book.
+
+    calibre's annotation browser sorts by spine_index + start_cfi and "Open in
+    viewer" jumps to them (and fails without them), so every highlight gets
+    them. They're recomputed only for changed records or when the library
+    file changed. When the passage can't be placed exactly, the record points
+    at the start of its chapter (kobo.cfi_exact = False).
+    """
+    offset = None
+    for k, rec in plan.records.items():
+        kobo = rec['kobo']
+        if kobo.get('cfi_sig') == library_sig and k not in plan.changed:
+            continue
+        book = get_library_book()
+        if offset is None:
+            offset = viewer_spine_offset()
+        anchor = kobo.get('anchor') or {}
+        spot = plan.spots.get(k) if plan.spots_book is book else None
+        if spot:  # already know where it is in this very file
+            pos = A.calibre_position_at(*spot)
+        else:
+            pos = A.calibre_position(book, anchor) if anchor.get('exact') or anchor.get('dogear') else None
+        if pos:
+            pos['spine_index'] += offset
+        else:
+            href = book.find_href(anchor.get('href') or '')
+            pos = {'spine_index': (book.spine.index(href) if href else 0) + offset,
+                   'spine_name': href or '', 'start_cfi': '/2', 'end_cfi': '/2'}
+        kobo['cfi_exact'] = pos['start_cfi'] != '/2'
+        if rec['type'] == 'highlight':
+            rec.update(pos)
+        elif kobo['cfi_exact']:
+            rec['pos_type'] = 'epubcfi'
+            rec['pos'] = f'epubcfi(/{2 * (pos["spine_index"] + 1)}{pos["start_cfi"]})'
+        kobo['cfi_sig'] = library_sig
+        plan.changed.add(k)
 
 
 def apply_to_device(con, plan):

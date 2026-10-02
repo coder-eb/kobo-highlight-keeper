@@ -51,6 +51,22 @@ contents (e.g. *Part I › Chapter 1*). calibre uses it in the annotations
 browser's **Export** (grouped by chapter), and so does the plugin's own
 Markdown export.
 
+Each annotation also gets a **calibre viewer position** (`spine_index` +
+`start_cfi`/`end_cfi`) in the library's copy of the book, which is your KEPUB
+if there is one, else the EPUB. That lets calibre's annotations browser list
+highlights in reading order, and lets **Open in viewer** jump to the passage.
+Positions follow calibre's own CFI rules (`src/pyj/read_book/cfi.pyj`):
+- **Text offsets** count a parent's direct text only. A passage starting
+  right after an inline element is written as the end of that element's
+  text, which is the same spot, to avoid calibre's ambiguous form.
+- **Chapter numbers** include the cover page calibre's viewer inserts before
+  KEPUBs (`calibre.srv.render_book.create_cover_page`).
+
+`calibre-debug -e harness/verify_cfi.py` checks positions with a port of
+calibre's decoder on books as calibre parses them: 1,982 of 1,982 decoded
+to the exact passage. The GUI scenario checks chapter numbers against
+calibre's real viewer preparation (`render_for_viewer`).
+
 **Safety:**
 - Before writing, the Kobo database is checked with SQLite's
   `quick_check`. If it's damaged, nothing is written and the report says so.
@@ -88,8 +104,8 @@ highlights each):
 | Case | Time |
 |---|---|
 | Connect, nothing changed (the everyday case) | 0.05 s, no writes |
-| Restore 5 wiped books | 0.20 s |
-| First sync of 750 highlights (one-off) | 0.9 s |
+| Restore 5 wiped books | 0.28 s |
+| First sync of 750 highlights (one-off, incl. calibre positions) | 1.5 s |
 
 Times are on a Mac SSD; over USB the first two stay small because they
 barely touch book files.

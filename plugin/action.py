@@ -16,6 +16,24 @@ from calibre_plugins.kobo_highlight_keeper.core.export import book_markdown
 from calibre_plugins.kobo_highlight_keeper.devicejob import run_sync
 
 
+def viewer_spine_offset(path, fmt):
+    """How many pages calibre's viewer inserts before the book's own spine.
+
+    When preparing a non-EPUB format (KEPUB included) that has a cover image,
+    the viewer adds a generated 'titlepage.html' as the first spine item
+    (calibre.srv.render_book.create_cover_page); EPUBs are left as they are.
+    """
+    if not path or fmt.upper() == 'EPUB':
+        return 0
+    from calibre.ebooks.oeb.polish.container import EpubContainer
+    from calibre.ebooks.oeb.polish.cover import find_cover_image
+    from calibre.utils.logging import default_log
+    try:
+        return 1 if find_cover_image(EpubContainer(path, default_log), strict=True) else 0
+    except Exception:
+        return 0
+
+
 class ReportDialog(QDialog):
     def __init__(self, parent, text):
         super().__init__(parent)
@@ -96,8 +114,13 @@ class KoboHighlightKeeperAction(InterfaceAction):
                 continue
             found.append((book_id, path))
         records = store.load_all_records(db, [i for i, _ in found])
-        return [{'key': i, 'title': db.field_for('title', i), 'path': p, 'records': records.get(i, [])}
-                for i, p in found]
+        tasks = []
+        for i, p in found:
+            fmt = store.target_format(db, i)
+            lib = db.format_abspath(i, fmt)
+            tasks.append({'key': i, 'title': db.field_for('title', i), 'path': p, 'records': records.get(i, []),
+                          'library_path': lib, 'viewer_spine_offset': partial(viewer_spine_offset, lib, fmt)})
+        return tasks
 
     def sync_selected(self):
         ids = set(self.gui.library_view.get_selected_ids())

@@ -13,7 +13,7 @@ import re
 from bisect import bisect_right
 from difflib import SequenceMatcher
 
-from .epubtext import kobo_offset_to_pos, run_offset_to_kobo
+from .epubtext import kobo_offset_to_pos, run_offset_to_kobo, u16
 
 CONTEXT = 48
 DOGEAR_SPAN = 80
@@ -265,6 +265,16 @@ def _common_suffix(a, b):
     return _common_prefix(a[::-1], b[::-1])
 
 
+class _LazyChapters:
+    """Iterable of chapters in a given order, parsed only when reached (and cached by Book)."""
+
+    def __init__(self, book, hrefs):
+        self.book, self.hrefs = book, hrefs
+
+    def __iter__(self):
+        return (self.book.chapter(h) for h in self.hrefs)
+
+
 def locate(book, anchor):
     """Find an anchor in ``book``.
 
@@ -276,9 +286,9 @@ def locate(book, anchor):
     if not exact:
         return None
     home = book.find_href(anchor.get('href') or '')
-    chapters = book.chapters()
-    if home:
-        chapters.sort(key=lambda c: c.href != home)
+    # Own chapter first; the others are only parsed if it isn't found there.
+    order = ([home] if home else []) + [h for h in book.spine if h != home]
+    chapters = _LazyChapters(book, order)
 
     best = None
     for ch in chapters:
@@ -420,3 +430,37 @@ def to_kobo_location(book, chapter, start, end):
         loc['StartContainerPath'] += f':{s_off})'
         loc['EndContainerPath'] += f':{e_off})'
     return loc
+
+
+# --- calibre viewer positions --------------------------------------------
+
+def calibre_cfi(chapter, pos, at_end=False):
+    """calibre-viewer CFI (within the spine item) for a chapter position, or None."""
+    run = _run_for(chapter, pos, at_end)
+    if run is None or not run.cfi_ok or run.cfi_el is None:
+        return None
+    p = min(max(pos, run.start), run.end)
+    if not at_end and p == run.start and chapter.cfi_base(run) > 0:
+        # calibre counts only a parent's direct text, so "start of the text
+        # after an inline element" encodes the same as "end of the text
+        # before it" and decodes to the latter. Use the identical caret
+        # position "end of the text inside that element" instead.
+        i = chapter.runs.index(run)
+        if i > 0 and chapter.runs[i - 1].end == run.start and chapter.runs[i - 1].cfi_ok:
+            return calibre_cfi(chapter, run.start, at_end=True)
+    return chapter.cfi_for(run, u16(chapter.text[run.start:p]))
+
+
+def calibre_position_at(ch, start, end):
+    """calibre-viewer position for known chapter offsets, or None."""
+    s = calibre_cfi(ch, start)
+    e = calibre_cfi(ch, end, at_end=True) if end > start else s
+    if not s or not e:
+        return None
+    return {'spine_index': ch.spine_index, 'spine_name': ch.href, 'start_cfi': s, 'end_cfi': e}
+
+
+def calibre_position(book, anchor):
+    """{'spine_index', 'spine_name', 'start_cfi', 'end_cfi'} for an anchor in ``book``, or None."""
+    m = locate(book, anchor)
+    return calibre_position_at(m['chapter'], m['start'], m['end']) if m else None

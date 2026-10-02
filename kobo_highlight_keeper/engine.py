@@ -4,15 +4,18 @@ Shared by the calibre plugin (inside a device job, on the driver's own DB
 connection) and by the command line / test harness (plain sqlite3).
 """
 
+import filecmp
 from pathlib import Path
 
 from . import kobodb
 from .epubtext import Book
-from .sync import ACTIVE, DELETED, apply_to_device, reconcile
+from .sync import ACTIVE, DELETED, add_calibre_positions, apply_to_device, reconcile
 
 
 def sync_books(conn, mount, tasks, backup=None):
-    """tasks: [{'key': <calibre id>, 'title': str, 'path': <file on device>, 'records': [...]}]
+    """tasks: [{'key': <calibre id>, 'title': str, 'path': <file on device>, 'records': [...],
+              optional 'library_path': <calibre's copy, for viewer positions>,
+              optional 'viewer_spine_offset': callable -> int}]
 
     Returns [{'key', 'title', 'plan'|'error'}]. Device rows are written on
     ``conn`` (the caller commits); ``backup()`` runs once before any write.
@@ -52,6 +55,11 @@ def sync_books(conn, mount, tasks, backup=None):
             results.append({'key': t['key'], 'title': t.get('title'), 'error': f'{path.name}: {e}'})
             continue
         plan.opened_file = 'book' in opened
+        if t.get('library_path'):
+            try:
+                add_library_positions(plan, t, path, opened)
+            except Exception as e:  # positions are a convenience; never fail the sync
+                plan.log.append(f'calibre viewer positions skipped: {e}')
         results.append({'key': t['key'], 'title': t.get('title') or path.name, 'plan': plan})
 
     matched = {kobodb.volume_id_for(mount, t['path']) for t in tasks}
@@ -72,6 +80,26 @@ def sync_books(conn, mount, tasks, backup=None):
                 if r.get('plan'):
                     apply_to_device(conn, r['plan'])
     return SyncResult(results, unmatched)
+
+
+def add_library_positions(plan, task, device_path, device_opened):
+    lib = Path(task['library_path'])
+    st = lib.stat()
+    opened = {}
+
+    def get_library_book():
+        if 'book' not in opened:
+            # The library copy is often the very file that was sent (a KEPUB
+            # sent as-is): then reuse the already-parsed device book.
+            if 'book' in device_opened and st.st_size == device_path.stat().st_size \
+                    and filecmp.cmp(lib, device_path, shallow=False):
+                opened['book'] = device_opened['book']
+            else:
+                opened['book'] = Book(lib)
+        return opened['book']
+
+    add_calibre_positions(plan, get_library_book, [st.st_size, int(st.st_mtime)],
+                          task.get('viewer_spine_offset') or (lambda: 0))
 
 
 class SyncResult(list):

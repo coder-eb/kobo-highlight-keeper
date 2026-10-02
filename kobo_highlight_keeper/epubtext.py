@@ -38,6 +38,12 @@ class Run:
     kind: str           # 'span' (kepub) or 'text' (epub)
     span_id: str = ''   # kepub: 'kobo.12.3'
     point_path: str = ''  # epub: '/1/4/2/26/1'
+    # for calibre viewer CFIs (built on demand, see Chapter.cfi_for):
+    # the parent element of this text and which of its text nodes it is
+    # (-1 = parent.text, i = tail of the parent's i-th child)
+    cfi_el: object = None
+    cfi_child: int = -1
+    cfi_ok: bool = True
 
 
 @dataclass
@@ -47,6 +53,43 @@ class Chapter:
     text: str = ''
     runs: list = field(default_factory=list)
     ids: dict = field(default_factory=dict)  # element id -> offset in text
+    root: object = None
+
+    def cfi_for(self, run, offset16):
+        """calibre-viewer CFI for a UTF-16 offset into ``run`` (paths built lazily, cached)."""
+        if not hasattr(self, '_cfi_cache'):
+            counts = {}
+            for el in self.root.iter():
+                if el.get('id'):
+                    counts[el.get('id')] = counts.get(el.get('id'), 0) + 1
+            self._unique = {i for i, n in counts.items() if n == 1}
+            self._parents = {c: p for p in self.root.iter() for c in p}
+            self._cfi_cache = {}
+        el = run.cfi_el
+        # calibre counts a parent's direct text from its first child node
+        first = '/1' if el.text or not len(el) else '/2' + _idspec(el[0], self._unique)
+        return f'{self._path(el)}{first}:{self.cfi_base(run) + offset16}'
+
+    @staticmethod
+    def cfi_base(run):
+        """UTF-16 length of the parent's direct text before this run's text node."""
+        el = run.cfi_el
+        if run.cfi_child < 0:
+            return 0
+        return u16(el.text or '') + sum(u16(el[i].tail or '') for i in range(run.cfi_child))
+
+    def _path(self, el):
+        cached = self._cfi_cache.get(el)
+        if cached is None:
+            parent = self._parents.get(el)
+            if parent is self.root or parent is None:
+                # calibre parses with an HTML5 parser, so <head> always exists
+                # and <body> is always the 2nd element of <html>: '/2/4'
+                cached = '/2' + _idspec(self.root, self._unique) + '/4' + _idspec(el, self._unique)
+            else:
+                cached = f'{self._path(parent)}/{2 * (list(parent).index(el) + 1)}{_idspec(el, self._unique)}'
+            self._cfi_cache[el] = cached
+        return cached
 
     def run_at(self, pos, prefer_end=False):
         """The run containing flat-text offset ``pos``."""
@@ -207,6 +250,7 @@ class Book:
         def mark(el_id):
             ch.ids.setdefault(el_id, pos)
 
+        ch.root = root
         body = root.find(f'{XHTML_NS}body')
         if body is None:
             body = root.find('body')
@@ -223,6 +267,22 @@ BLOCK_TAGS = {
     'figure', 'figcaption', 'table', 'ul', 'ol', 'hr',
 }
 SKIP_TAGS = {'script', 'style', 'head'}
+
+
+_CFI_ESCAPE = re.compile(r'([\[\],^();~@!])')
+
+
+def _idspec(el, unique):
+    """calibre adds an [id] assertion to steps for elements with a unique id."""
+    i = el.get('id')
+    if not i or i not in unique:
+        return ''
+    return '[' + _CFI_ESCAPE.sub(r'^\1', i) + ']'
+
+
+def u16(text):
+    """Length as JavaScript counts it (UTF-16 code units)."""
+    return len(text.encode('utf-16-le')) // 2
 
 
 def _walk(el, path, emit, kepub, mark):
@@ -243,12 +303,12 @@ def _walk(el, path, emit, kepub, mark):
         mark(el.get('id'))
     if kepub and name == 'span' and 'koboSpan' in (el.get('class') or '') \
             and KOBO_SPAN_RE.match(el.get('id') or ''):
-        emit(''.join(el.itertext()), 'span', span_id=el.get('id'))
+        emit(''.join(el.itertext()), 'span', span_id=el.get('id'), cfi_el=el, cfi_ok=not len(el))
     else:
-        emit(el.text, loose, point_path=f'{path}/1')
+        emit(el.text, loose, point_path=f'{path}/1', cfi_el=el)
         for i, child in enumerate(el):
             _walk(child, f'{path}/{2 * (i + 1)}', emit, kepub, mark)
-            emit(child.tail, loose, point_path=f'{path}/{2 * (i + 1) + 1}')
+            emit(child.tail, loose, point_path=f'{path}/{2 * (i + 1) + 1}', cfi_el=el, cfi_child=i)
     if name in BLOCK_TAGS or name == 'br':
         emit(PARAGRAPH_SEP, 'gap')
 
