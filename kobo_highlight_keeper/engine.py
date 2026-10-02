@@ -12,7 +12,7 @@ from .epubtext import Book
 from .sync import add_calibre_positions, apply_to_device, reconcile
 
 
-def sync_books(conn, mount, tasks, backup=None, write=True):
+def sync_books(conn, mount, tasks, backup=None, write=True, other_library_paths=()):
     """tasks: [{'key': <calibre id>, 'title': str, 'path': <file on device>, 'records': [...],
               optional 'library_path': <calibre's copy, for viewer positions>,
               optional 'viewer_spine_offset': callable -> int}]
@@ -22,6 +22,9 @@ def sync_books(conn, mount, tasks, backup=None, write=True):
 
     Cost: two queries for the whole device; a book file is opened only when
     one of its annotations is new, edited, missing or its file changed.
+
+    other_library_paths: device files of library books not being synced this
+    time (a selected-books sync), so they aren't reported as unmatched.
 
     write=False copies from the Kobo only: everything is worked out, but no
     change is written to the Kobo (they wait for the next full sync).
@@ -65,7 +68,7 @@ def sync_books(conn, mount, tasks, backup=None, write=True):
                 plan.log.append(f'calibre viewer positions skipped: {e}')
         results.append({'key': t['key'], 'title': t.get('title') or path.name, 'plan': plan})
 
-    matched = {kobodb.volume_id_for(mount, t['path']) for t in tasks}
+    matched = {kobodb.volume_id_for(mount, p) for p in [t['path'] for t in tasks] + list(other_library_paths)}
     unmatched = unmatched_volumes(conn, rows_by_volume, matched)
 
     if not write:

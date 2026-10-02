@@ -180,6 +180,7 @@ class KoboHighlightKeeperAction(InterfaceAction):
     def _tasks(self, only_ids):
         db = self.gui.current_db.new_api
         found = []
+        self._other_library_paths = []
         for book in self.gui.memory_view.model().db or ():
             path = getattr(book, 'path', '') or ''
             if not path.lower().endswith('.epub'):
@@ -187,7 +188,10 @@ class KoboHighlightKeeperAction(InterfaceAction):
             book_id = getattr(book, 'application_id', None)
             if book_id is None and getattr(book, 'uuid', None):
                 book_id = db.lookup_by_uuid(book.uuid)
-            if book_id is None or (only_ids is not None and book_id not in only_ids):
+            if book_id is None:
+                continue
+            if only_ids is not None and book_id not in only_ids:
+                self._other_library_paths.append(path)  # in the library, just not synced now
                 continue
             found.append((book_id, path))
         records = store.load_all_records(db, [i for i, _ in found])
@@ -224,7 +228,7 @@ class KoboHighlightKeeperAction(InterfaceAction):
         self.gui.device_manager.create_job(
             run_sync, Dispatcher(partial(self._sync_done, interactive)),
             description='Sync Kobo annotations',
-            args=[dev, tasks, cfg.backup_dir(), cfg.prefs['keep_backups'], write])
+            args=[dev, tasks, cfg.backup_dir(), cfg.prefs['keep_backups'], write, self._other_library_paths])
         self.gui.status_bar.show_message('Kobo highlights: ' + ('syncing…' if write else 'copying from the Kobo…'))
 
     def _sync_done(self, interactive, job):

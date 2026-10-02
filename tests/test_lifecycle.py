@@ -306,7 +306,12 @@ class TestCalibreIsMaster(unittest.TestCase):
         con.close()
         self.assertEqual([(u['title'], u['count']) for u in res.unmatched], [('The Reformatory', 1)])
         self.assertIn('not in the library', summarize(res)[2])
-        self.assertTrue(other.exists())
+        # a selected-books sync: the other book is in the library, just not synced now
+        con = kobodb.connect(self.dev.db)
+        res = sync_books(con, self.dev.mount, [{'key': 1, 'title': 'Botchan', 'path': self.path,
+                                                 'records': self.records}], other_library_paths=[other])
+        con.close()
+        self.assertEqual(res.unmatched, [], 'books in the library are not reported as unmatched')
 
     def test_damaged_database_blocks_writes(self):
         from unittest import mock

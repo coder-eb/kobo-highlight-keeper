@@ -31,9 +31,10 @@ from .kobodb import is_hidden
 
 USER_TYPE, USER = 'local', 'kobo'
 ACTIVE, DELETED, REPLACED = 'active', 'deleted_on_device', 'replaced'
-# Clara BW only writes 0; colour models use the codes measured by
-# Calibre-Web-NextGen (0 yellow, 1 pink, 2 blue, 3 green).
-KOBO_COLORS = {0: 'yellow', 1: 'red', 2: 'blue', 3: 'green'}
+# Colour models use the codes measured by Calibre-Web-NextGen (0 yellow,
+# 1 pink, 2 blue, 3 green). A Clara BW (firmware 4.45) writes 4 for its
+# single, uncoloured highlight style. The row's Color is kept unchanged.
+KOBO_COLORS = {0: 'yellow', 1: 'red', 2: 'blue', 3: 'green', 4: 'yellow'}
 LOCATION_COLS = ('StartContainerPath', 'StartOffset', 'EndContainerPath', 'EndOffset',
                  'ChapterProgress', 'ContentID')
 

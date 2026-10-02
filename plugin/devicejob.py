@@ -3,7 +3,7 @@
 import os
 
 
-def run_sync(device, tasks, backup_dir, keep_backups, write=True):
+def run_sync(device, tasks, backup_dir, keep_backups, write=True, other_library_paths=()):
     from calibre_plugins.kobo_highlight_keeper.core import kobodb
     from calibre_plugins.kobo_highlight_keeper.core.engine import sync_books
 
@@ -19,11 +19,11 @@ def run_sync(device, tasks, backup_dir, keep_backups, write=True):
         # The driver's connection: holds calibre's kobo_db_lock and copies the
         # database back if the driver had to work on a local copy.
         with transaction(use_row_factory=True) as conn:
-            results = sync_books(conn, mount, tasks, backup, write=write)
+            results = sync_books(conn, mount, tasks, backup, write=write, other_library_paths=other_library_paths)
     else:  # calibre < 8
         conn = kobodb.connect(db_path)
         try:
-            results = sync_books(conn, mount, tasks, backup, write=write)
+            results = sync_books(conn, mount, tasks, backup, write=write, other_library_paths=other_library_paths)
             conn.commit()
         finally:
             conn.close()
