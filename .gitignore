@@ -1,0 +1,5 @@
+sandbox/
+__pycache__/
+*.pyc
+dist/
+sandbox_run_gui.out

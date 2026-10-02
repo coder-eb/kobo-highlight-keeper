@@ -1,0 +1,164 @@
+import os
+from functools import partial
+
+from calibre.gui2 import Dispatcher, choose_dir, error_dialog, info_dialog
+from calibre.gui2.actions import InterfaceAction
+from calibre.gui2.device import device_signals
+from calibre.utils.filenames import ascii_filename
+from qt.core import (
+    QDialog, QDialogButtonBox, QIcon, QMenu, QPlainTextEdit, QTimer, QToolButton, QVBoxLayout,
+)
+
+from calibre_plugins.kobo_highlight_keeper import config as cfg
+from calibre_plugins.kobo_highlight_keeper import store
+from calibre_plugins.kobo_highlight_keeper.core.engine import summarize
+from calibre_plugins.kobo_highlight_keeper.core.export import book_markdown
+from calibre_plugins.kobo_highlight_keeper.devicejob import run_sync
+
+
+class ReportDialog(QDialog):
+    def __init__(self, parent, text):
+        super().__init__(parent)
+        self.setWindowTitle('Kobo Highlight Keeper: sync history')
+        self.resize(900, 560)
+        lay = QVBoxLayout(self)
+        view = QPlainTextEdit(self)
+        view.setReadOnly(True)
+        view.setPlainText(text)
+        lay.addWidget(view)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+
+class KoboHighlightKeeperAction(InterfaceAction):
+    name = 'Kobo Highlight Keeper'
+    action_spec = ('Kobo annotations', None, 'Keep Kobo highlights in calibre and restore them', None)
+    popup_type = QToolButton.ToolButtonPopupMode.InstantPopup
+    action_type = 'current'
+
+    def genesis(self):
+        self._running = False
+        self.qaction.setIcon(QIcon.ic('highlight.png'))
+        self.menu = QMenu(self.gui)
+        self.qaction.setMenu(self.menu)
+        m = self.menu
+        self.create_menu_action(m, 'khk-sync-all', 'Sync annotations with Kobo now',
+                                icon='sync.png', triggered=partial(self.sync, None, True))
+        self.create_menu_action(m, 'khk-sync-sel', 'Sync selected books only',
+                                triggered=self.sync_selected)
+        m.addSeparator()
+        self.create_menu_action(m, 'khk-report', 'Show sync history', icon='dialog_information.png',
+                                triggered=self.show_report)
+        self.create_menu_action(m, 'khk-export', 'Export selected books’ annotations to Markdown…',
+                                icon='save.png', triggered=self.export_selected)
+        self.create_menu_action(m, 'khk-undelete', 'Restore highlights deleted on the Kobo (selected books)',
+                                triggered=self.undelete_selected)
+        m.addSeparator()
+        self.create_menu_action(m, 'khk-config', 'Settings…', icon='config.png',
+                                triggered=lambda: self.interface_action_base_plugin.do_user_config(self.gui))
+        device_signals.device_metadata_available.connect(self._metadata_available)
+
+    # --- device ---------------------------------------------------------------
+    def kobo(self):
+        from calibre.devices.kobo.driver import KOBO
+        dev = self.gui.device_manager.connected_device
+        if isinstance(dev, KOBO) and getattr(dev, '_main_prefix', None):
+            return dev
+        return None
+
+    def _metadata_available(self):
+        if cfg.prefs['auto_sync'] and self.kobo() is not None:
+            # Let calibre finish matching device books to the library first.
+            QTimer.singleShot(250, partial(self.sync, None, False))
+
+    def _tasks(self, only_ids):
+        db = self.gui.current_db.new_api
+        tasks = []
+        for book in self.gui.memory_view.model().db or ():
+            path = getattr(book, 'path', '') or ''
+            if not path.lower().endswith('.epub') or not os.path.exists(path):
+                continue
+            book_id = getattr(book, 'application_id', None)
+            if book_id is None and getattr(book, 'uuid', None):
+                book_id = db.lookup_by_uuid(book.uuid)
+            if book_id is None or (only_ids is not None and book_id not in only_ids):
+                continue
+            tasks.append({'key': book_id, 'title': db.field_for('title', book_id), 'path': path,
+                          'records': store.load_records(db, book_id)})
+        return tasks
+
+    def sync_selected(self):
+        ids = set(self.gui.library_view.get_selected_ids())
+        if not ids:
+            return error_dialog(self.gui, 'No books selected', 'Select books in the library first.', show=True)
+        self.sync(ids, True)
+
+    def sync(self, only_ids=None, interactive=True):
+        dev = self.kobo()
+        if dev is None:
+            if interactive:
+                error_dialog(self.gui, 'No Kobo connected', 'Connect a Kobo reader first.', show=True)
+            return
+        if self._running:
+            return
+        tasks = self._tasks(only_ids)
+        self._running = True
+        self.gui.device_manager.create_job(
+            run_sync, Dispatcher(partial(self._sync_done, interactive)),
+            description='Sync Kobo annotations',
+            args=[dev, tasks, cfg.backup_dir(), cfg.prefs['keep_backups']])
+        self.gui.status_bar.show_message('Kobo annotations: syncing…')
+
+    def _sync_done(self, interactive, job):
+        self._running = False
+        if job.failed:
+            return self.gui.job_exception(job, dialog_title='Kobo annotation sync failed')
+        out = job.result
+        db = self.gui.current_db.new_api
+        for r in out['results']:
+            plan = r.get('plan')
+            if plan is not None and plan.changed:
+                store.save_records(db, r['key'], list(plan.records.values()))
+        head, tot, detail = summarize(out['results'])
+        backups = ''.join(f'\nKobo database backed up to: {b}' for b in out['backups'])
+        eventful = any(v for k, v in tot.items() if k != 'books')
+        if interactive or eventful:  # auto-sync runs after every device refresh
+            cfg.save_report(f'{head}\n{backups}\n\n{detail}\n')
+        msg = 'Kobo annotations: ' + head
+        if tot['orphans'] or tot['errors']:
+            msg += '  (see Kobo annotations → Show last sync report)'
+        self.gui.status_bar.show_message(msg, 15000)
+        if interactive:
+            self.show_report()
+
+    # --- library ----------------------------------------------------------------
+    def show_report(self):
+        ReportDialog(self.gui, cfg.load_report()).exec()
+
+    def export_selected(self):
+        db = self.gui.current_db.new_api
+        ids = self.gui.library_view.get_selected_ids()
+        with_annots = [i for i in ids if store.load_records(db, i)]
+        if not with_annots:
+            return info_dialog(self.gui, 'Nothing to export',
+                               'None of the selected books have Kobo annotations.', show=True)
+        dest = choose_dir(self.gui, 'khk-export-dir', 'Export Kobo annotations to')
+        if not dest:
+            return
+        for i in with_annots:
+            title = db.field_for('title', i)
+            authors = ' & '.join(db.field_for('authors', i))
+            md = book_markdown(title, authors, store.load_records(db, i))
+            with open(os.path.join(dest, ascii_filename(f'{title} - {authors}')[:150] + '.md'), 'w',
+                      encoding='utf-8') as f:
+                f.write(md)
+        info_dialog(self.gui, 'Exported', f'Wrote {len(with_annots)} Markdown file(s) to {dest}', show=True)
+
+    def undelete_selected(self):
+        db = self.gui.current_db.new_api
+        n = sum(store.reactivate_deleted(db, i) for i in self.gui.library_view.get_selected_ids())
+        info_dialog(self.gui, 'Highlights reactivated',
+                    f'{n} highlight(s) will be restored to the Kobo on the next sync.', show=True)
+        if n and self.kobo() is not None:
+            self.sync(None, True)
