@@ -208,6 +208,8 @@ Still unconfirmed on a real device (marked ASSUMED in the code):
 |---|---|
 | **Sync with Kobo now** | Same as the automatic sync on connect. Greyed out without a Kobo. |
 | **Sync selected books with Kobo** | The same, limited to the books selected in the library. |
+| **View Kobo highlights…** | The plugin's own reading view; also opens when you click the toolbar button. Books on the left (most recently highlighted first, with covers). The chosen book's highlights on the right, grouped by chapter, with notes and dates. Each card has **Open in viewer** and **Copy**. Searches highlights and notes across all books; highlights deleted on the Kobo can be shown. |
+| **Open calibre's annotations browser** | calibre's own browser, set to show only Kobo highlights. calibre remembers that filter; change *User* back to see others. |
 | **Export highlights of selected books…** | Markdown files, one per book, grouped by chapter. |
 | **Send back highlights deleted on the Kobo** | Highlights you deleted on the Kobo stay in calibre, struck out. This puts them back on the Kobo for the selected books. |
 | **Sync history** | What the last 30 syncs did. |

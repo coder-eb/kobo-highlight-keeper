@@ -54,7 +54,7 @@ class ReportDialog(QDialog):
 class KoboHighlightKeeperAction(InterfaceAction):
     name = 'Kobo Highlight Keeper'
     action_spec = ('Kobo highlights', None, 'Keep Kobo highlights in calibre and restore them to the Kobo', None)
-    popup_type = QToolButton.ToolButtonPopupMode.InstantPopup
+    popup_type = QToolButton.ToolButtonPopupMode.MenuButtonPopup
     action_type = 'current'
 
     def genesis(self):
@@ -64,6 +64,8 @@ class KoboHighlightKeeperAction(InterfaceAction):
         self.qaction.setMenu(self.menu)
         m = self.menu
         m.setToolTipsVisible(True)
+        self._view = None
+        self.qaction.triggered.connect(self.show_view)  # the button itself opens the view
 
         def item(key, text, tip, triggered, icon=None):
             ac = self.create_menu_action(m, key, text, icon=icon, description=tip, triggered=triggered)
@@ -80,6 +82,14 @@ class KoboHighlightKeeperAction(InterfaceAction):
             'khk-sync-sel', 'Sync selected books with Kobo',
             'Same as Sync with Kobo now, for the books selected in the library only.',
             self.sync_selected)
+        m.addSeparator()
+        # looking at highlights
+        item('khk-view', 'View Kobo highlights…',
+             'Read your Kobo highlights and notes book by book, grouped by chapter, with search.',
+             self.show_view, icon='highlight.png')
+        item('khk-browse', 'Open calibre’s annotations browser',
+             "calibre's own annotations browser, set to show only Kobo highlights.",
+             self.show_calibre_browser, icon='edit-find.png')
         m.addSeparator()
         # with the selected books
         self.export_action = item(
@@ -101,6 +111,27 @@ class KoboHighlightKeeperAction(InterfaceAction):
         self._synced_this_connection = False
         device_signals.device_connection_changed.connect(self._connection_changed)
         device_signals.device_metadata_available.connect(self._metadata_available)
+
+    def show_view(self):
+        from calibre_plugins.kobo_highlight_keeper.view import KoboHighlightsView
+        if self._view is None:
+            self._view = KoboHighlightsView(self.gui)
+        self._view.reload(select_ids=self.gui.library_view.get_selected_ids())
+        self._view.show()
+        self._view.raise_()
+        self._view.activateWindow()
+
+    def show_calibre_browser(self):
+        from calibre.gui2 import gprefs
+        from qt.core import QComboBox
+        gprefs['browse_annots_restrict_to_user'] = 'local:kobo'
+        action = self.gui.iactions['Browse Annotations']
+        action.show_browser()
+        # already-open browser: switch its user filter too
+        for box in action.browser.findChildren(QComboBox):
+            row = box.findData('local:kobo')
+            if row > -1:
+                box.setCurrentIndex(row)
 
     def _update_menu(self):
         """Grey out what can't run right now, and say why."""
@@ -199,6 +230,8 @@ class KoboHighlightKeeperAction(InterfaceAction):
             if plan is not None and plan.changed:
                 store.save_records(db, r['key'], plan.all_records())
         self._refresh_viewer_mirrors(db, out['results'])
+        if self._view is not None and self._view.isVisible():
+            self._view.reload()
         unmatched = getattr(out['results'], 'unmatched', [])
         if unmatched:
             cfg.save_unmatched(unmatched)

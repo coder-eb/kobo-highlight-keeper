@@ -292,12 +292,28 @@ def scenario(h):
             "Reformatory's 3 Kobo highlights are in calibre's viewer annotations")
     h.check(any(a.get('uuid') == 'made-in-the-viewer' for a in vr), 'own viewer highlight untouched')
 
-    h.gui.iactions['Browse Annotations'].show_browser()
+    h.khk.show_calibre_browser()
     yield wait(h, lambda: h.window('annotations') is not None, 15, 'annotations browser')
     yield Until(lambda: True, 1, 'render')
     br = h.window('annotations')
     h.shot('05-calibre-annotations-browser', br)
     br.close()
+
+    # the plugin's own view
+    h.gui.library_view.select_rows({REF})
+    h.khk.show_view()
+    yield wait(h, lambda: h.khk._view is not None and h.khk._view.isVisible(), 15, 'Kobo Highlights view')
+    yield Until(lambda: True, 1, 'render')
+    v = h.khk._view
+    h.check(v.current_book_id() == REF and v.book_list.count() == 3, 'view opens on the selected book, lists 3 books')
+    h.shot('05b-kobo-highlights-view', v)
+    v.search.setText('mother')
+    yield Until(lambda: True, 1, 'render')
+    h.check(v.book_list.count() == 2 and '2 highlights in 2 books' in v.status.text(),
+            'search matches highlights and notes ("mother": a Botchan highlight, a Reformatory note)')
+    h.shot('05c-kobo-highlights-search', v)
+    v.search.clear()
+    v.close()
 
     # 4. delete Reformatory from the Kobo via calibre: the driver wipes Bookmarks
     ref_path = next(b.path for b in h.device_books() if 'Reformatory' in (b.title or ''))
@@ -339,6 +355,14 @@ def scenario(h):
     h.check(len(deleted) == 1, 'kept in calibre, marked deleted on device')
     h.check(bool(deleted) and deleted[0]['style'].get('which') == 'strikeout',
             'deleted-on-device highlight shown struck out in calibre')
+    h.gui.library_view.select_rows({BOT})
+    h.khk.show_view()
+    yield wait(h, lambda: h.khk._view.isVisible(), 15, 'view')
+    h.khk._view.show_deleted.setChecked(True)
+    yield Until(lambda: True, 1, 'render')
+    h.shot('06a-view-deleted-on-kobo', h.khk._view)
+    h.khk._view.show_deleted.setChecked(False)
+    h.khk._view.close()
     h.gui.iactions['Browse Annotations'].show_browser()
     yield wait(h, lambda: h.window('annotations') is not None, 15, 'annotations browser')
     br = h.window('annotations')
