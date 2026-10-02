@@ -16,6 +16,10 @@ user='kobo') with everything Kobo-specific under the 'kobo' key:
 
 Dogears (Kobo bookmarks without text) are stored as calibre 'bookmark'
 annotations titled 'Kobo dogear <id>' with the same 'kobo' payload.
+
+calibre is the main copy: an annotation deleted in calibre (calibre leaves a
+{'removed': True, 'uuid'/'title'} marker) is deleted from the Kobo, and a
+note edited in calibre is sent to the Kobo (if both sides edited, newer wins).
 """
 
 import copy
@@ -40,13 +44,36 @@ class Plan:
     changed: set = field(default_factory=set)          # keys whose record changed
     to_insert: list = field(default_factory=list)      # Bookmark rows for the device
     to_repair: list = field(default_factory=list)      # (BookmarkID, location fields)
+    to_update: list = field(default_factory=list)      # (BookmarkID, fields): notes edited in calibre
+    to_delete: list = field(default_factory=list)      # BookmarkIDs deleted in calibre
     orphans: list = field(default_factory=list)        # records that could not be placed
     pending: list = field(default_factory=list)        # restores waiting for Kobo to index
+    tombstones: list = field(default_factory=list)     # calibre's markers for deleted annotations
     log: list = field(default_factory=list)
+    raw_before_update: dict = field(default_factory=dict)  # BookmarkID -> raw, to undo note pushes
 
     @property
     def device_writes(self):
-        return bool(self.to_insert or self.to_repair)
+        return bool(self.to_insert or self.to_repair or self.to_update or self.to_delete)
+
+    def skip_device_writes(self, reason):
+        """Drop planned Kobo writes; records keep their pre-sync device state."""
+        if not self.device_writes:
+            return
+        for row in self.to_insert:
+            rec = self.records.get(row_key(row))
+            if rec:
+                rec['kobo']['on_device'] = False
+        for rec in self.records.values():
+            before = self.raw_before_update.get(bookmark_id(rec))
+            if before is not None:  # the Kobo still has the old note
+                rec['kobo']['raw'] = before
+        self.to_insert, self.to_repair, self.to_update, self.to_delete = [], [], [], []
+        self.log.append('ERROR ' + reason)
+
+    def all_records(self):
+        """Everything to store back in calibre, including deletion markers."""
+        return list(self.records.values()) + self.tombstones
 
 
 def now_iso():
@@ -71,6 +98,25 @@ def kobo_ts(value):
 
 def record_key(rec):
     return rec.get('uuid') or rec.get('title')
+
+
+def row_key(row):
+    """The record key a device row has (or would get) in calibre."""
+    return f'Kobo dogear {row["BookmarkID"][:8]}' if is_dogear(row) else row['BookmarkID']
+
+
+def kobo_now():
+    """Timestamp in the format Kobo writes."""
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
+
+
+def set_chapter(rec, book):
+    """Chapter path for calibre's annotation browser (groups by chapter)."""
+    a = rec['kobo'].get('anchor')
+    if a and a.get('href'):
+        titles = book.toc_titles(book.find_href(a['href']) or a['href'], a.get('start', 0))
+        if titles:
+            rec['toc_family_titles'] = titles
 
 
 def bookmark_id(rec):
@@ -157,7 +203,10 @@ def reconcile(get_book, book_format, volume_id, file_sig, device_rows, records,
     chapter_id_for  callable(book, href) -> Kobo chapter ContentID
     device_indexed  False when Kobo hasn't indexed the file yet (just sent)
     """
-    plan = Plan(records={record_key(r): copy.deepcopy(r) for r in records})
+    tombstones = [r for r in records if r.get('removed')]
+    records = [r for r in records if not r.get('removed') and 'kobo' in r]
+    plan = Plan(records={record_key(r): copy.deepcopy(r) for r in records}, tombstones=tombstones)
+    deleted_in_calibre = {record_key(t) for t in tombstones}
     by_bid = {bookmark_id(r): k for k, r in plan.records.items()}
     visible = {r['BookmarkID']: r for r in device_rows if not is_hidden(r)}
     hidden = {r['BookmarkID'] for r in device_rows if is_hidden(r)}
@@ -169,9 +218,15 @@ def reconcile(get_book, book_format, volume_id, file_sig, device_rows, records,
             plan.log.append(f'skip handwritten markup {bid} (not supported)')
             continue
         key = by_bid.get(bid)
+        if key is None and row_key(row) in deleted_in_calibre:
+            plan.to_delete.append(bid)
+            plan.log.append(f'deleted in calibre, removed from Kobo: {(row.get("Text") or "dogear")[:50]!r}')
+            continue
         if key is None:
-            anchor = anchor_for_row(get_book(), row)
+            book = get_book()
+            anchor = anchor_for_row(book, row)
             rec = row_to_record(row, anchor, book_format, volume_id, file_sig)
+            set_chapter(rec, book)
             k = record_key(rec)
             # Same passage re-highlighted after a wipe: the new row wins.
             for other in plan.records.values():
@@ -194,6 +249,21 @@ def reconcile(get_book, book_format, volume_id, file_sig, device_rows, records,
             kobo['state'] = ACTIVE  # present on device again: it is active
             kobo['history'].append({'at': now_iso(), 'event': 'reactivated'})
             changed = True
+        if rec['type'] == 'highlight':
+            synced, here = old.get('Annotation') or '', rec.get('notes') or ''
+            on_kobo = row.get('Annotation') or ''
+            if here != synced and (on_kobo == synced or
+                                   kobo_ts(rec['timestamp']) > kobo_ts(row.get('DateModified'))):
+                # Edited in calibre (and newer than any edit on the Kobo): send it.
+                fields = {'Annotation': here or None, 'DateModified': kobo_now(),
+                          'Type': 'note' if here else 'highlight'}
+                plan.to_update.append((bid, fields))
+                plan.raw_before_update[bid] = dict(old)
+                row = dict(row, **fields)
+                kobo['raw'] = dict(old, **fields)
+                old = kobo['raw']
+                plan.log.append(f'note edited in calibre, sent to Kobo: {(row.get("Text") or "")[:50]!r}')
+                changed = True
         if any(row.get(c) != old.get(c) for c in CONTENT_KEYS):
             if rec['type'] == 'highlight':
                 rec['highlighted_text'] = row.get('Text') or ''
@@ -246,6 +316,8 @@ def reconcile(get_book, book_format, volume_id, file_sig, device_rows, records,
             kobo['raw'] = row
             kobo.update(on_device=True, volume_id=volume_id, file_sig=file_sig, format=book_format)
             kobo['history'].append({'at': now_iso(), 'event': 'restored', 'method': 'same-position'})
+            if 'toc_family_titles' not in rec:
+                set_chapter(rec, book)
             plan.changed.add(k)
             plan.log.append(f'restore (same position): {(rec.get("highlighted_text") or "dogear")[:50]!r}')
             continue
@@ -267,6 +339,7 @@ def reconcile(get_book, book_format, volume_id, file_sig, device_rows, records,
         kobo['raw'] = row
         kobo.update(on_device=True, volume_id=volume_id, file_sig=file_sig, format=book_format)
         kobo['history'].append({'at': now_iso(), 'event': 'restored', 'method': m['method']})
+        set_chapter(rec, book)
         plan.changed.add(k)
         plan.log.append(f'restore ({m["method"]}): {(rec.get("highlighted_text") or "dogear")[:50]!r}')
 
@@ -280,6 +353,7 @@ def reconcile(get_book, book_format, volume_id, file_sig, device_rows, records,
             fresh = anchor_for_row(book, row)
             if fresh:
                 rec['kobo']['anchor'] = fresh
+                set_chapter(rec, book)
             continue
         m = A.locate(book, rec['kobo'].get('anchor') or {}) if rec['kobo'].get('anchor') else None
         if m is None:
@@ -299,9 +373,11 @@ def reconcile(get_book, book_format, volume_id, file_sig, device_rows, records,
 
 
 def apply_to_device(con, plan):
-    from .kobodb import insert_bookmark, update_bookmark
+    from .kobodb import delete_bookmark, insert_bookmark, update_bookmark
     for row in plan.to_insert:
         insert_bookmark(con, row)
-    for bid, fields in plan.to_repair:
+    for bid, fields in plan.to_repair + plan.to_update:
         update_bookmark(con, bid, fields)
+    for bid in plan.to_delete:
+        delete_bookmark(con, bid)
 

@@ -164,9 +164,15 @@ class HarnessAction(InterfaceAction):
         con.close()
         return n
 
+    def kobo_note(self, text_start):
+        con = sqlite3.connect(os.path.join(KOBO, '.kobo', 'KoboReader.sqlite'))
+        row = con.execute('SELECT Annotation FROM Bookmark WHERE Text LIKE ?', (text_start + '%',)).fetchone()
+        con.close()
+        return row[0] if row else None
+
     def calibre_records(self, book_id, state=None):
         from calibre_plugins.kobo_highlight_keeper import store
-        recs = store.load_records(self.gui.current_db.new_api, book_id)
+        recs = [r for r in store.load_records(self.gui.current_db.new_api, book_id) if 'kobo' in r]
         return [r for r in recs if state is None or r['kobo']['state'] == state]
 
     def view(self, where):
@@ -298,13 +304,41 @@ def scenario(h):
     h.shot('06-annotations-browser-after-device-delete', br)
     br.close()
 
-    # 8. manual sync from the menu shows the report
+    # 8. calibre is the main copy: delete a highlight and edit a note in
+    #    calibre (the same calls calibre's annotation browser makes)
+    db = h.gui.current_db.new_api
+    ann = list(db.all_annotations(restrict_to_user=('local', 'kobo'), restrict_to_book_ids={REF}))
+    to_delete = next(a for a in ann if (a['annotation'].get('highlighted_text') or '').startswith('His hope'))
+    to_edit = next(a for a in ann if (a['annotation'].get('highlighted_text') or '').startswith('That'))
+    db.delete_annotations([to_delete['id']])
+    db.update_annotations({to_edit['id']: dict(to_edit['annotation'], notes='Edited in calibre')})
+    log('calibre: deleted one Reformatory highlight, edited one note')
+
+    # 9. manual sync from the menu sends both and shows the report
     QTimer.singleShot(0, lambda: h.khk.sync(None, True))
     yield wait(h, lambda: h.window('sync history') is not None, 60, 'report dialog')
     yield Until(lambda: True, 1, 'render')
     dlg = h.window('sync history')
     h.shot('07-sync-history', dlg)
     dlg.reject()
+    h.check(h.bookmark_rows('Reformatory') == 2, 'highlight deleted in calibre was deleted on the Kobo')
+    h.check(h.kobo_note('That') == 'Edited in calibre', 'note edited in calibre was sent to the Kobo')
+    out = h.nickel('verify')
+    h.check(out.returncode == 0, 'independent check after calibre-side changes')
+    QTimer.singleShot(0, lambda: h.khk.sync(None, False))
+    yield settle(h, 'second sync after calibre edits')
+    h.check(h.bookmark_rows('Reformatory') == 2 and len(h.calibre_records(REF)) == 2,
+            'deleted highlight did not come back on the next sync')
+    h.check(all(r.get('toc_family_titles') for r in h.calibre_records(REF)),
+            'highlights carry chapter titles')
+    h.gui.iactions['Browse Annotations'].show_browser()
+    yield wait(h, lambda: h.window('annotations') is not None, 15, 'annotations browser')
+    br = h.window('annotations')
+    if hasattr(br, 'refresh'):
+        br.refresh()
+    yield Until(lambda: True, 1, 'render')
+    h.shot('07b-annotations-browser-chapters', br)
+    br.close()
     h.view('main')
     yield settle(h, 'device view')
     h.shot('08-device-view-final')

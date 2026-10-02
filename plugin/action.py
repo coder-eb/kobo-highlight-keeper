@@ -130,10 +130,15 @@ class KoboHighlightKeeperAction(InterfaceAction):
         for r in out['results']:
             plan = r.get('plan')
             if plan is not None and plan.changed:
-                store.save_records(db, r['key'], list(plan.records.values()))
+                store.save_records(db, r['key'], plan.all_records())
+        unmatched = getattr(out['results'], 'unmatched', [])
+        if unmatched:
+            cfg.save_unmatched(unmatched)
         head, tot, detail = summarize(out['results'])
+        if unmatched:
+            detail += '\n    (saved to ' + cfg.UNMATCHED_FILE + ')'
         backups = ''.join(f'\nKobo database backed up to: {b}' for b in out['backups'])
-        eventful = any(v for k, v in tot.items() if k != 'books')
+        eventful = any(v for k, v in tot.items() if k != 'books') or bool(unmatched)
         if interactive or eventful:  # auto-sync runs after every device refresh
             cfg.save_report(f'{head}\n{backups}\n\n{detail}\n')
         msg = 'Kobo annotations: ' + head
@@ -150,7 +155,7 @@ class KoboHighlightKeeperAction(InterfaceAction):
     def export_selected(self):
         db = self.gui.current_db.new_api
         ids = self.gui.library_view.get_selected_ids()
-        with_annots = [i for i in ids if store.load_records(db, i)]
+        with_annots = [i for i in ids if any('kobo' in r for r in store.load_records(db, i))]
         if not with_annots:
             return info_dialog(self.gui, 'Nothing to export',
                                'None of the selected books have Kobo annotations.', show=True)

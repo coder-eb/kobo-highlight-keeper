@@ -87,7 +87,7 @@ class Device:
         con.close()
         print('\n' + summarize(res)[2])
         plan = res[0]['plan'] if res else None
-        return plan, list(plan.records.values()) if plan else records, backups
+        return plan, plan.all_records() if plan else records, backups
 
     def bookmark_count(self, rel):
         con = sqlite3.connect(self.db)
@@ -219,6 +219,107 @@ class TestLifecycle(unittest.TestCase):
         self.dev.nickel('import')
         plan, records, _ = self.dev.sync(path, records)
         self.assertEqual(len(plan.to_insert), 2)
+        self.dev.nickel('verify')
+
+
+def calibre_now():
+    """Timestamp in the format calibre's annotation edits use."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+@unittest.skipUnless(BOOKS.exists(), 'run harness/setup_sandbox.py first')
+class TestCalibreIsMaster(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='khk-')
+        self.dev = Device(Path(self.tmp) / 'KOBOeReader')
+        self.src = glob.glob(str(BOOKS / '852' / '*.kepub'))[0]
+        self.rel = 'Natsume Soseki/Botchan - Natsume Soseki.kepub.epub'
+        self.path = self.dev.send(self.src, self.rel)
+        self.dev.nickel('import')
+        for text, note in HIGHLIGHTS['botchan']:
+            self.dev.nickel('highlight', 'Botchan', '--text', text, *(['--note', note] if note else []))
+        _, self.records, _ = self.dev.sync(self.path, [])
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def device_rows(self):
+        con = kobodb.connect(self.dev.db)
+        rows = {r['BookmarkID']: r for r in con.execute('SELECT * FROM Bookmark')}
+        con.close()
+        return rows
+
+    def by_text(self, start):
+        return next(r for r in self.records if (r.get('highlighted_text') or '').startswith(start))
+
+    def test_delete_and_note_edit_in_calibre_reach_the_kobo(self):
+        plain = self.by_text('From the time')
+        noted = self.by_text('After my mother')
+        # what calibre's annotation browser does on delete / note edit
+        tomb = {'removed': True, 'uuid': plain['uuid'], 'type': 'highlight', 'timestamp': calibre_now()}
+        noted = dict(noted, notes='edited in calibre', timestamp=calibre_now())
+        plan, records, backups = self.dev.sync(self.path, [tomb, noted])
+        self.assertEqual(plan.to_delete, [plain['uuid']])
+        self.assertEqual(len(plan.to_update), 1)
+        self.assertEqual(len(backups), 1)
+        rows = self.device_rows()
+        self.assertNotIn(plain['uuid'], rows, 'deleted in calibre -> deleted on the Kobo')
+        self.assertEqual(rows[noted['uuid']]['Annotation'], 'edited in calibre')
+        self.assertIn(tomb, plan.all_records(), "calibre's deletion marker is kept")
+        self.dev.nickel('verify')
+        # next sync: nothing comes back, nothing is written
+        plan, _, backups = self.dev.sync(self.path, plan.all_records())
+        self.assertFalse(plan.device_writes or plan.changed or backups)
+
+    def test_note_conflicts_newer_edit_wins(self):
+        noted = self.by_text('After my mother')
+        con = sqlite3.connect(self.dev.db)
+        con.execute("UPDATE Bookmark SET Annotation = 'edited on kobo', DateModified = '2020-01-01T00:00:00.000' "
+                    'WHERE BookmarkID = ?', (noted['uuid'],))
+        con.commit()
+        con.close()
+        # calibre edited later than the Kobo -> calibre wins
+        plan, records, _ = self.dev.sync(self.path, [dict(noted, notes='edited in calibre', timestamp=calibre_now())])
+        self.assertEqual(self.device_rows()[noted['uuid']]['Annotation'], 'edited in calibre')
+        # the Kobo edits later (calibre untouched) -> the Kobo wins
+        con = sqlite3.connect(self.dev.db)
+        con.execute("UPDATE Bookmark SET Annotation = 'newer on kobo', DateModified = '2099-01-01T00:00:00.000' "
+                    'WHERE BookmarkID = ?', (noted['uuid'],))
+        con.commit()
+        con.close()
+        plan, records, _ = self.dev.sync(self.path, records)
+        self.assertEqual(next(r for r in records if r.get('uuid') == noted['uuid'])['notes'], 'newer on kobo')
+        self.assertFalse(plan.to_update)
+
+    def test_chapter_titles(self):
+        self.assertEqual(self.by_text('From the time')['toc_family_titles'], ['Botchan', 'Chapter 1'])
+
+    def test_unmatched_books_are_reported(self):
+        other = self.dev.send(glob.glob(str(BOOKS / '890' / '*.kepub'))[0], 'X/Reformatory.kepub.epub')
+        self.dev.nickel('import')
+        self.dev.nickel('highlight', 'Reformatory.kepub', '--text', 'That\u2019s how fast she was gone. Always.')
+        con = kobodb.connect(self.dev.db)
+        res = sync_books(con, self.dev.mount, [{'key': 1, 'title': 'Botchan', 'path': self.path,
+                                                 'records': self.records}])
+        con.close()
+        self.assertEqual([(u['title'], u['count']) for u in res.unmatched], [('The Reformatory', 1)])
+        self.assertIn('not in the library', summarize(res)[2])
+        self.assertTrue(other.exists())
+
+    def test_damaged_database_blocks_writes(self):
+        from unittest import mock
+        self.dev.calibre_delete(self.rel)
+        self.path = self.dev.send(self.src, self.rel)
+        self.dev.nickel('import')
+        with mock.patch('kobo_highlight_keeper.engine.integrity_problem', return_value='page 3 is never used'):
+            plan, records, backups = self.dev.sync(self.path, self.records)
+        self.assertFalse(backups)
+        self.assertEqual(self.dev.bookmark_count(self.rel), 0, 'nothing written to a damaged database')
+        self.assertTrue(any(line.startswith('ERROR') for line in plan.log))
+        # once the database is fine again, the restore happens
+        plan, records, _ = self.dev.sync(self.path, records)
+        self.assertEqual(self.dev.bookmark_count(self.rel), 2)
         self.dev.nickel('verify')
 
 

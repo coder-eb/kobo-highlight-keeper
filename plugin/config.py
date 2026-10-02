@@ -13,6 +13,32 @@ REPORT_FILE = os.path.join(DATA_DIR, 'sync-report.txt')
 NO_REPORT = 'No sync has run yet.'
 
 
+UNMATCHED_FILE = os.path.join(DATA_DIR, 'unmatched-books-annotations.json')
+
+
+def save_unmatched(unmatched):
+    """Raw Kobo rows of annotated books that aren't in the library, so nothing is lost.
+
+    Merged by BookmarkID, so rows from earlier syncs are kept too.
+    """
+    import json
+    os.makedirs(DATA_DIR, exist_ok=True)
+    try:
+        with open(UNMATCHED_FILE, encoding='utf-8') as f:
+            saved = json.load(f)
+    except (FileNotFoundError, ValueError):
+        saved = {}
+    for u in unmatched:
+        book = saved.setdefault(u['volume_id'], {'title': u['title'], 'annotations': {}})
+        book['title'] = u['title']
+        for row in u['rows']:
+            book['annotations'][row['BookmarkID']] = row
+    tmp = UNMATCHED_FILE + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(saved, f, indent=1, default=str)
+    os.replace(tmp, UNMATCHED_FILE)
+
+
 def backup_dir():
     return prefs['backup_dir'] or os.path.join(DATA_DIR, 'kobo-db-backups')
 

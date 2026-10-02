@@ -7,7 +7,9 @@ from calibre_plugins.kobo_highlight_keeper.core.sync import ACTIVE, DELETED, USE
 
 
 def _ours(a):
-    return a['user_type'] == USER_TYPE and a['user'] == USER and 'kobo' in a['annotation']
+    """Our records, plus calibre's markers for ones deleted in calibre."""
+    annot = a['annotation']
+    return a['user_type'] == USER_TYPE and a['user'] == USER and ('kobo' in annot or annot.get('removed'))
 
 
 def load_records(db, book_id):
@@ -18,7 +20,7 @@ def load_all_records(db, book_ids):
     """Kobo records for many books in a single query: {book_id: [records]}."""
     out = {}
     for a in db.all_annotations(restrict_to_user=(USER_TYPE, USER), restrict_to_book_ids=set(book_ids)):
-        if 'kobo' in a['annotation']:
+        if _ours(a):
             out.setdefault(a['book_id'], []).append(a['annotation'])
     return out
 
@@ -46,7 +48,7 @@ def reactivate_deleted(db, book_id):
     records = load_records(db, book_id)
     n = 0
     for r in records:
-        if r['kobo']['state'] == DELETED:
+        if 'kobo' in r and r['kobo']['state'] == DELETED:
             r['kobo']['state'] = ACTIVE
             r['kobo']['on_device'] = False
             apply_state_style(r)

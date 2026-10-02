@@ -9,7 +9,7 @@ calibre is the main copy. The Kobo holds a working copy that can be rebuilt.
 ## What it does
 
 When a Kobo is connected (or when you pick **Kobo annotations → Sync now**),
-the plugin does four things for every book on the device that's in your
+the plugin does the following for every book on the device that's in your
 library:
 
 1. **Pull.** New and edited highlights, notes and dogears go into calibre's
@@ -40,6 +40,23 @@ library:
 4. **Repair.** Highlights still on the Kobo whose location no longer points
    at their text (span ids shifted after re-conversion) are moved to the
    right place.
+5. **Changes made in calibre.** calibre is the main copy:
+   - a highlight you delete in calibre (e.g. in **Browse annotations**) is
+     deleted from the Kobo and doesn't come back
+   - a note you edit in calibre is sent to the Kobo; if the note was also
+     edited on the Kobo since the last sync, the newer edit wins
+
+Each annotation also gets its chapter path from the book's table of
+contents (e.g. *Part I › Chapter 1*). calibre uses it in the annotations
+browser's **Export** (grouped by chapter), and so does the plugin's own
+Markdown export.
+
+**Safety:**
+- Before writing, the Kobo database is checked with SQLite's
+  `quick_check`. If it's damaged, nothing is written and the report says so.
+- Books on the Kobo that have annotations but aren't in the library (or
+  aren't matched to it) are listed in the report. Their raw annotation rows
+  are saved to `<calibre config>/plugins/Kobo Highlight Keeper/unmatched-books-annotations.json`.
 
 A just-sent book has to be indexed by the Kobo before highlights can be
 written for it. So the sequence is: send → eject → let the Kobo import it →

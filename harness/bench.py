@@ -111,7 +111,7 @@ def main():
         for r in res:
             if r.get('plan') is not None:
                 if r['plan'].changed:
-                    store[r['key']] = list(r['plan'].records.values())
+                    store[r['key']] = r['plan'].all_records()
                     writes += 1
         return writes
 

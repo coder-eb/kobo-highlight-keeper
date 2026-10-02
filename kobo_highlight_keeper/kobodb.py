@@ -121,6 +121,10 @@ def insert_bookmark(con, row):
         [row[c] for c in cols])
 
 
+def delete_bookmark(con, bookmark_id):
+    con.execute('DELETE FROM Bookmark WHERE BookmarkID = ?', (bookmark_id,))
+
+
 def update_bookmark(con, bookmark_id, fields):
     cols = [c for c in columns(con) if c in fields and c != 'BookmarkID']
     con.execute(f'UPDATE Bookmark SET {", ".join(f"{c} = ?" for c in cols)} WHERE BookmarkID = ?',

@@ -46,6 +46,7 @@ class Chapter:
     spine_index: int
     text: str = ''
     runs: list = field(default_factory=list)
+    ids: dict = field(default_factory=dict)  # element id -> offset in text
 
     def run_at(self, pos, prefer_end=False):
         """The run containing flat-text offset ``pos``."""
@@ -81,6 +82,10 @@ class Book:
         self.title = (opf.findtext(f'.//{DC_NS}title') or '').strip()
         self.authors = [a.text.strip() for a in opf.iter(f'{DC_NS}creator') if a.text]
         manifest = {i.get('id'): i for i in opf.iter(f'{OPF_NS}item')}
+        self.manifest = manifest
+        spine_el = opf.find(f'{OPF_NS}spine')
+        self.ncx_id = spine_el.get('toc') if spine_el is not None else None
+        self._toc = None
         self.spine = []
         for ref in opf.iter(f'{OPF_NS}itemref'):
             item = manifest.get(ref.get('idref'))
@@ -107,6 +112,83 @@ class Book:
                 return h
         return None
 
+    # --- table of contents ---------------------------------------------------
+    def toc(self):
+        """[(zip href, fragment, (title, ..., title))] in reading order (nav, else NCX)."""
+        if self._toc is None:
+            self._toc = []
+            try:
+                nav = next((i for i in self.manifest.values() if 'nav' in (i.get('properties') or '').split()), None)
+                if nav is not None:
+                    self._parse_nav(posixpath.normpath(posixpath.join(self.opf_dir, nav.get('href'))))
+                elif self.ncx_id in self.manifest:
+                    self._parse_ncx(posixpath.normpath(posixpath.join(self.opf_dir, self.manifest[self.ncx_id].get('href'))))
+            except Exception:
+                self._toc = []  # a broken TOC only costs chapter names
+        return self._toc
+
+    def _add_toc(self, base, src, path):
+        target, _, frag = (src or '').partition('#')
+        if target:
+            href = posixpath.normpath(posixpath.join(posixpath.dirname(base), target))
+            self._toc.append((href, frag, tuple(path)))
+
+    def _parse_nav(self, href):
+        root = parse_xhtml(self.zf.read(href))
+        ops_type = '{http://www.idpf.org/2007/ops}type'
+        navs = [n for n in root.iter() if n.tag.endswith('nav')]
+        nav = next((n for n in navs if n.get(ops_type) == 'toc'), navs[0] if navs else None)
+
+        def walk_ol(ol, path):
+            for li in (c for c in ol if c.tag.endswith('li')):
+                a = next((c for c in li if c.tag.endswith(('a', 'span'))), None)
+                title = ' '.join(''.join(a.itertext()).split()) if a is not None else ''
+                here = path + [title] if title else path
+                if a is not None and a.get('href'):
+                    self._add_toc(href, a.get('href'), here)
+                for sub in (c for c in li if c.tag.endswith('ol')):
+                    walk_ol(sub, here)
+        if nav is not None:
+            for ol in (c for c in nav if c.tag.endswith('ol')):
+                walk_ol(ol, [])
+
+    def _parse_ncx(self, href):
+        root = ET.fromstring(self.zf.read(href))
+
+        def walk(el, path):
+            for np_ in (c for c in el if c.tag.endswith('navPoint')):
+                label = next((t for t in np_.iter() if t.tag.endswith('text')), None)
+                title = ' '.join((label.text or '').split()) if label is not None else ''
+                here = path + [title] if title else path
+                content = next((c for c in np_ if c.tag.endswith('content')), None)
+                if content is not None:
+                    self._add_toc(href, content.get('src'), here)
+                walk(np_, here)
+        nav_map = next((c for c in root if c.tag.endswith('navMap')), None)
+        if nav_map is not None:
+            walk(nav_map, [])
+
+    def toc_titles(self, href, pos):
+        """Chapter path (outermost first) for raw offset ``pos`` in spine item ``href``."""
+        entries = self.toc()
+        if not entries:
+            return []
+        here = [(i, e) for i, e in enumerate(entries) if e[0] == href]
+        if here:
+            ch = self.chapter(href)
+            best = None
+            for i, (_, frag, titles) in here:
+                at = ch.ids.get(frag, 0) if frag else 0
+                if at <= pos and (best is None or (at, i) >= best[0]):
+                    best = ((at, i), titles)
+            if best:
+                return list(best[1])
+        # No entry in this file (or none before pos): the chapter it continues.
+        order = {h: n for n, h in enumerate(self.spine)}
+        mine = order.get(href, -1)
+        before = [(order.get(e[0], -1), i, e[2]) for i, e in enumerate(entries) if order.get(e[0], -1) < mine]
+        return list(max(before)[2]) if before else []
+
     def _load_chapter(self, href):
         root = parse_xhtml(self.zf.read(href))
         ch = Chapter(href=href, spine_index=self.spine.index(href) if href in self.spine else -1)
@@ -122,12 +204,15 @@ class Book:
                 ch.runs.append(Run(pos, pos + len(text), kind, **kw))
             pos += len(text)
 
+        def mark(el_id):
+            ch.ids.setdefault(el_id, pos)
+
         body = root.find(f'{XHTML_NS}body')
         if body is None:
             body = root.find('body')
         if body is not None:
             body_index = list(root).index(body)
-            _walk(body, f'/1/{2 * (body_index + 1)}', emit, self.is_kepub)
+            _walk(body, f'/1/{2 * (body_index + 1)}', emit, self.is_kepub, mark)
         ch.text = ''.join(parts)
         return ch
 
@@ -140,7 +225,7 @@ BLOCK_TAGS = {
 SKIP_TAGS = {'script', 'style', 'head'}
 
 
-def _walk(el, path, emit, kepub):
+def _walk(el, path, emit, kepub, mark):
     """Emit text in document order.
 
     EPUB: every DOM text node is a run addressed by a Kobo/CFI-style path
@@ -154,13 +239,15 @@ def _walk(el, path, emit, kepub):
     loose = 'gap' if kepub else 'text'
     if name in BLOCK_TAGS:
         emit(PARAGRAPH_SEP, 'gap')
+    if el.get('id'):
+        mark(el.get('id'))
     if kepub and name == 'span' and 'koboSpan' in (el.get('class') or '') \
             and KOBO_SPAN_RE.match(el.get('id') or ''):
         emit(''.join(el.itertext()), 'span', span_id=el.get('id'))
     else:
         emit(el.text, loose, point_path=f'{path}/1')
         for i, child in enumerate(el):
-            _walk(child, f'{path}/{2 * (i + 1)}', emit, kepub)
+            _walk(child, f'{path}/{2 * (i + 1)}', emit, kepub, mark)
             emit(child.tail, loose, point_path=f'{path}/{2 * (i + 1) + 1}')
     if name in BLOCK_TAGS or name == 'br':
         emit(PARAGRAPH_SEP, 'gap')
