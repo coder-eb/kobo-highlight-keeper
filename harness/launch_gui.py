@@ -44,6 +44,11 @@ def _sandbox_detect_device(self):
 
 gui_device.DeviceManager.detect_device = _sandbox_detect_device
 
+# No "Update available!" popups in the sandbox (they block the scenario).
+from calibre.gui2 import config as gui_config  # noqa: E402
+
+gui_config.set('new_version_notification', False)
+
 from calibre.gui2 import gprefs  # noqa: E402
 from calibre.utils.config import config_dir  # noqa: E402
 

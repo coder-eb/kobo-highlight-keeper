@@ -77,6 +77,10 @@ class TestLegacyImport(unittest.TestCase):
         j = next(r for r in new if r is not n)
         self.assertEqual(j['kobo']['history'][-1]['method'], 'fuzzy')
         self.assertIn('\n', j['highlighted_text'], "the book's own text keeps the paragraph break")
+        # importing again adds nothing, including the fuzzy-placed one
+        again, dupes2, _ = legacy.import_records(self.book, items, existing + new, 'kepub')
+        self.assertEqual(again, [])
+        self.assertEqual(len(dupes2), 3)
 
 
 if __name__ == '__main__':

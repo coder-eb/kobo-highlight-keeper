@@ -203,6 +203,19 @@ Still unconfirmed on a real device (marked ASSUMED in the code):
   place, e.g. after editing a book and re-sending it without deleting it
   first. `fake_nickel.py import --wipe-on-change` simulates the harsher case.
 
+## Moving from the Annotations plugin
+
+The menu item imports for the selected books. To import every book at once,
+with calibre closed:
+
+```bash
+calibre-debug -e scripts/import_annotations_plugin.py -- "/path/to/Calibre Library" [--dry-run]
+```
+
+It also places highlights for books that only have an ORIGINAL_KEPUB or
+ORIGINAL_EPUB. Running it again adds nothing. Afterwards the old column can
+be removed with `calibredb remove_custom_column <label>`.
+
 ## When a Kobo is connected
 
 Set in **Settings…**:

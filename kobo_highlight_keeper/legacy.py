@@ -92,12 +92,16 @@ def import_records(book, items, existing, book_format, spine_offset=0, library_s
     'active' and not yet on the Kobo, so the next full sync puts them there (or
     matches them to the Kobo's own copy if it still has them).
     """
-    have = {A.normalize(r.get('highlighted_text')) for r in existing
-            if 'kobo' in r and r.get('highlighted_text')}
+    def same_text(text):  # the old plugin dropped paragraph breaks: compare without any spaces
+        return A.normalize(text).replace(' ', '')
+
+    have = {same_text(r.get('highlighted_text')) for r in existing if 'kobo' in r and r.get('highlighted_text')}
+    imported = {h.get('hash') for r in existing if 'kobo' in r for h in r['kobo'].get('history', ())
+                if h.get('event', '').startswith('imported')}
     new, dupes, unplaced = [], [], []
     for it in items:
-        norm = A.normalize(it['text'])
-        if norm in have:
+        norm = same_text(it['text'])
+        if norm in have or (it['hash'] and it['hash'] in imported):
             dupes.append(it)
             continue
         text, method = it['text'], 'exact'
