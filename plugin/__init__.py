@@ -7,7 +7,7 @@ class KoboHighlightKeeperPlugin(InterfaceActionBase):
                    'restore them to the Kobo after a book is deleted, re-sent or re-converted.')
     supported_platforms = ['windows', 'osx', 'linux']
     author = 'Ebran Bright'
-    version = (0, 3, 0)
+    version = (0, 4, 0)
     minimum_calibre_version = (6, 0, 0)
     actual_plugin = 'calibre_plugins.kobo_highlight_keeper.action:KoboHighlightKeeperAction'
 

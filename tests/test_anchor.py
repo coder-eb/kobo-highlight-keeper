@@ -69,9 +69,10 @@ class TestAnchors(unittest.TestCase):
 
     def test_locate_across_formats(self):
         """A highlight made on the KEPUB is found in the EPUB and vice versa."""
-        for d in ('890', '859'):
-            ep, = books(f'{d}/*.epub')
-            kp, = books(f'{d}/*.kepub')
+        pairs = [(books(f'{d}/*.epub'), books(f'{d}/*.kepub')) for d in ('890', '859')]
+        pairs = [(e[0], k[0]) for e, k in pairs if e and k]  # books in your library may lose a format
+        self.assertTrue(pairs, 'need at least one sandbox book with both EPUB and KEPUB')
+        for ep, kp in pairs:
             for src, dst in ((kp, ep), (ep, kp)):
                 found = 0
                 for _ in range(N):

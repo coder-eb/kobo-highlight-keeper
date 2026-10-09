@@ -460,6 +460,34 @@ def scenario(h):
     out = h.nickel('verify')
     h.check(out.returncode == 0, 'independent check after edits in the view')
 
+    # 11. import highlights saved by the older Annotations plugin
+    import html as _html
+    from calibre_plugins.kobo_highlight_keeper.core.epubtext import Book as _Book
+    lib_book = _Book(db.format_abspath(LAD, 'KEPUB'))
+    ch = max(lib_book.chapters(), key=lambda c: len(c.text))
+    paras = [p.strip() for p in ch.text.split('\n') if len(p.strip()) > 80]
+    old = [(paras[5][:120], ''), (paras[8][:150], 'a note from the old plugin'),
+           (paras[10][-40:].strip() + paras[11][:40].strip(), ''),  # paragraphs run together, as it stored them
+           (LADIES[1][0], '')]                                      # already in Kobo Highlight Keeper
+    old_html = '<div class="user_annotations">' + ''.join(
+        f'<div class="annotation" hash="h{i}" reader="KoboTouch"><table><tr><td class="location">x</td>'
+        f'<td class="timestamp" uts="1770460620"></td></tr></table><p class="highlight">{_html.escape(t)}</p>'
+        + (f'<p class="note">{_html.escape(nt)}</p>' if nt else '') + '</div>'
+        for i, (t, nt) in enumerate(old)) + '</div>'
+    db.set_field('#mm_annotations', {LAD: old_html})
+    h.gui.library_view.select_rows({LAD})
+    n = h.khk.import_legacy(confirm=False)
+    h.check(n == 3, f'imported 3 highlights from the Annotations plugin column (got {n}); 1 duplicate skipped')
+    imported = [r for r in h.calibre_records(LAD) if r['kobo']['history']
+                and r['kobo']['history'][-1]['event'].startswith('imported')]
+    h.check(len(imported) == 3 and all(r.get('start_cfi') and r.get('toc_family_titles') for r in imported),
+            'imported highlights have calibre viewer positions and chapters')
+    QTimer.singleShot(0, lambda: h.khk.sync(None, False))
+    yield settle(h, 'sync after import')
+    h.check(h.bookmark_rows('Ladies') == 5, 'imported highlights were put on the Kobo (2 + 3)')
+    out = h.nickel('verify', 'Ladies')
+    h.check(out.returncode == 0, 'independent check: imported highlights sit on the right words on the Kobo')
+
     h.view('main')
     yield settle(h, 'device view')
     h.shot('08-device-view-final')

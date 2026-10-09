@@ -12,7 +12,11 @@ from qt.core import (
 from calibre_plugins.kobo_highlight_keeper import config as cfg
 from calibre_plugins.kobo_highlight_keeper import store
 from calibre_plugins.kobo_highlight_keeper.core.engine import summarize
+from calibre_plugins.kobo_highlight_keeper.core.epubtext import Book
 from calibre_plugins.kobo_highlight_keeper.core.export import book_markdown
+from calibre_plugins.kobo_highlight_keeper.core.legacy import LEGACY_MARKER
+from calibre_plugins.kobo_highlight_keeper.core.legacy import import_records as legacy_import
+from calibre_plugins.kobo_highlight_keeper.core.legacy import parse as legacy_parse
 from calibre_plugins.kobo_highlight_keeper.core.viewer import feedback as viewer_feedback
 from calibre_plugins.kobo_highlight_keeper.core.viewer import mirrored as viewer_mirrored
 from calibre_plugins.kobo_highlight_keeper.devicejob import run_sync
@@ -100,6 +104,11 @@ class KoboHighlightKeeperAction(InterfaceAction):
             'khk-export', 'Export highlights of selected books…',
             'Save the highlights and notes of the selected books as Markdown files, one per book.',
             self.export_selected, icon='save.png')
+        self.import_action = item(
+            'khk-import', 'Import highlights from the Annotations plugin…',
+            'Bring highlights saved by the older Annotations plugin (its custom column) into Kobo Highlight '
+            'Keeper, for the selected books. The old column is left unchanged.',
+            self.import_legacy)
         self.undelete_action = item(
             'khk-undelete', 'Send back highlights deleted on the Kobo',
             'Highlights you delete on the Kobo stay in calibre (struck out). '
@@ -160,6 +169,7 @@ class KoboHighlightKeeperAction(InterfaceAction):
                                      'Sync selected books with Kobo (' +
                                      ('connect a Kobo' if not connected else 'select books') + ')')
         for ac, text in ((self.export_action, 'Export highlights of selected books…'),
+                         (self.import_action, 'Import highlights from the Annotations plugin…'),
                          (self.undelete_action, 'Send back highlights deleted on the Kobo')):
             ac.setEnabled(selected)
             ac.setText(text if selected else text.rstrip('…') + ' (select books)')
@@ -308,6 +318,77 @@ class KoboHighlightKeeperAction(InterfaceAction):
                       encoding='utf-8') as f:
                 f.write(md)
         info_dialog(self.gui, 'Exported', f'Wrote {len(with_annots)} Markdown file(s) to {dest}', show=True)
+
+    def legacy_column(self, db):
+        """The custom column the Annotations plugin writes to, or None."""
+        from calibre.utils.config import JSONConfig
+        try:
+            mappings = JSONConfig('plugins/annotations').get('cc_mappings', {})
+            lib = os.path.basename(os.path.normpath(db.library_path))
+            field = (mappings.get(lib) or {}).get('annotations', {}).get('field')
+            if field and field in db.field_metadata.custom_field_keys():
+                return field
+        except Exception:
+            pass
+        for field in db.field_metadata.custom_field_keys():  # not configured: look for its HTML
+            if db.field_metadata[field]['datatype'] != 'comments':
+                continue
+            for i in db.search(f'{field}:"~user_annotations"'):
+                if LEGACY_MARKER in (db.field_for(field, i) or ''):
+                    return field
+        return None
+
+    def import_legacy(self, confirm=True):
+        from calibre.gui2 import question_dialog
+        db = self.gui.current_db.new_api
+        field = self.legacy_column(db)
+        if field is None:
+            return info_dialog(self.gui, 'Nothing to import',
+                               'No highlights from the Annotations plugin were found in this library.', show=True)
+        selected = self.gui.library_view.get_selected_ids()
+        with_old = [i for i in (selected or db.all_book_ids()) if LEGACY_MARKER in (db.field_for(field, i) or '')]
+        if not with_old:
+            return info_dialog(self.gui, 'Nothing to import',
+                               'None of the selected books have highlights from the Annotations plugin.', show=True)
+        plans, skipped_books = [], []
+        for book_id in with_old:
+            fmt = store.target_format(db, book_id)
+            path = db.format_abspath(book_id, fmt) if fmt in ('KEPUB', 'EPUB') else None
+            if not path:
+                skipped_books.append(db.field_for('title', book_id))
+                continue
+            st = os.stat(path)
+            new, dupes, unplaced = legacy_import(
+                Book(path), legacy_parse(db.field_for(field, book_id)), store.load_records(db, book_id),
+                fmt.lower(), spine_offset=viewer_spine_offset(path, fmt), library_sig=[st.st_size, int(st.st_mtime)])
+            plans.append((book_id, new, dupes, unplaced))
+        n_new = sum(len(p[1]) for p in plans)
+        n_dup = sum(len(p[2]) for p in plans)
+        lost = [(db.field_for('title', b), u['text']) for b, _, _, un in plans for u in un]
+        summary = (f'{n_new} highlight(s) from {sum(1 for p in plans if p[1])} book(s) can be imported.'
+                   + (f'<br>{n_dup} are already in Kobo Highlight Keeper and will be skipped.' if n_dup else '')
+                   + (f'<br>{len(lost)} could not be found in the book and will be skipped.' if lost else '')
+                   + (f'<br>Books without an EPUB/KEPUB: {", ".join(skipped_books)}.' if skipped_books else '')
+                   + '<br><br>The Annotations plugin column is left unchanged. If a book is on your Kobo, '
+                     'its imported highlights go onto it at the next <b>Sync with Kobo now</b> (matched, '
+                     'not duplicated, if the Kobo still has them).')
+        if not n_new:
+            return info_dialog(self.gui, 'Nothing new to import', summary, show=True)
+        if confirm and not question_dialog(self.gui, 'Import highlights from the Annotations plugin?', summary):
+            return
+        for book_id, new, _, _ in plans:
+            if new:
+                records = store.load_records(db, book_id) + new
+                store.save_records(db, book_id, records)
+                self._records_changed(book_id, records)
+        detail = '\n'.join(f'  {t}: {x[:100]!r}' for t, x in lost)
+        cfg.save_report(f'Imported {n_new} highlight(s) from the Annotations plugin'
+                        + (f'; {len(lost)} not found in the book:\n{detail}' if lost else '') + '\n')
+        self.gui.status_bar.show_message(f'Kobo highlights: imported {n_new} highlight(s) from the Annotations plugin',
+                                         15000)
+        if self._view is not None and self._view.isVisible():
+            self._view.reload()
+        return n_new
 
     def undelete_selected(self):
         db = self.gui.current_db.new_api

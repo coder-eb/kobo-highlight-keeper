@@ -23,6 +23,12 @@ assert os.path.realpath(library).startswith(os.path.realpath(sandbox)), library
 
 cache = Cache(DB(library))
 cache.init()
+# The older Annotations plugin's column, to test importing from it.
+if '#mm_annotations' not in cache.field_metadata.custom_field_keys():
+    cache.create_custom_column('mm_annotations', 'Annotations', 'comments', False)
+    cache.close()
+    cache = Cache(DB(library))
+    cache.init()
 added = {}
 for entry in job['books']:
     d = Path(entry['dir'])
